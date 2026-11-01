@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -16,6 +17,85 @@ class SolveRequest(BaseModel):
     language: Optional[str] = Field(default=None, max_length=50)
     starter_code: Optional[str] = Field(default=None, max_length=50000)
     error_context: Optional[str] = Field(default=None, max_length=50000)
+    image_data: Optional[str] = Field(default=None, description="Base64 data URI or image URL of question diagram")
+    image_url: Optional[str] = Field(default=None, description="Direct HTTP(S) URL of question diagram")
+    images: Optional[List[str]] = Field(default=None, description="List of base64 data URIs or image URLs")
+    image_hash: Optional[str] = Field(default=None, description="SHA-256 hash of image data")
+    model: Optional[str] = Field(default=None, description="Optional model or cascade preference override")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_incoming_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # 1. Normalize aliases for question stem
+        stem = ""
+        for key in ("question", "stem", "question_text", "prompt", "text"):
+            val = data.get(key)
+            if val is not None:
+                cleaned = str(val).strip()
+                if cleaned:
+                    stem = cleaned
+                    break
+        data["question"] = stem
+
+        # 2. Normalize options: extract text from dicts/objects and filter empty
+        raw_options = data.get("options", [])
+        clean_options: List[str] = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if isinstance(opt, dict):
+                    t = opt.get("text") or opt.get("label") or opt.get("value") or opt.get("option_text") or ""
+                    cleaned_opt = str(t).strip()
+                    if cleaned_opt:
+                        clean_options.append(cleaned_opt)
+                elif opt is not None:
+                    cleaned_opt = str(opt).strip()
+                    if cleaned_opt:
+                        clean_options.append(cleaned_opt)
+        elif isinstance(raw_options, (str, bytes)):
+            cleaned_opt = str(raw_options).strip()
+            if cleaned_opt:
+                clean_options.append(cleaned_opt)
+        data["options"] = clean_options
+
+        # 3. Determine q_type
+        raw_q_type = data.get("q_type")
+        q_type_str = str(raw_q_type).strip().lower() if raw_q_type is not None else ""
+        if not q_type_str or q_type_str == "auto":
+            q_type_str = "mcq"
+
+        # 4. Handle empty stem and empty options
+        if not stem and not clean_options:
+            raise ValueError("No question text or options detected on page")
+
+        # 5. Auto-coerce mcq to text if options are empty but stem is non-empty
+        if q_type_str == "mcq" and len(clean_options) == 0 and stem:
+            q_type_str = "text"
+
+        data["q_type"] = q_type_str
+
+        # 6. Normalize image_data, image_url, and compute image_hash
+        img_url = data.get("image_url") or data.get("img_url")
+        if img_url and isinstance(img_url, str) and img_url.strip():
+            data["image_url"] = img_url.strip()
+
+        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
+        if img and isinstance(img, str) and img.strip():
+            data["image_data"] = img.strip()
+        elif "images" in data and isinstance(data["images"], list) and data["images"]:
+            first_img = str(data["images"][0]).strip()
+            if first_img:
+                data["image_data"] = first_img
+        elif data.get("image_url"):
+            data["image_data"] = data["image_url"]
+
+        if data.get("image_data"):
+            import hashlib
+            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
+
+        return data
 
     @field_validator("subject", mode="before")
     @classmethod
@@ -64,6 +144,7 @@ class SolveResponse(BaseModel):
     search_sources: List[str] = Field(default_factory=list)
     language: Optional[str] = None
     error: Optional[str] = None
+    image_hash: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -75,6 +156,9 @@ class HealthResponse(BaseModel):
     searxng_circuit_open: bool = False
     openrouter_keys_loaded: int = 1
     active_fallback_pool: List[str] = Field(default_factory=list)
+    active_model_selection: str = "auto"
+    timestamp: float = Field(default_factory=time.time)
+    uptime_seconds: float = 0.0
 
 
 class StatsResponse(BaseModel):
@@ -102,6 +186,80 @@ class FeedbackRequest(BaseModel):
     language: Optional[str] = Field(default=None, max_length=50)
     starter_code: Optional[str] = Field(default=None, max_length=50000)
     export_to_csv: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_incoming_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # 1. Normalize aliases for question stem
+        stem = ""
+        for key in ("question", "stem", "question_text", "prompt", "text"):
+            val = data.get(key)
+            if val is not None:
+                cleaned = str(val).strip()
+                if cleaned:
+                    stem = cleaned
+                    break
+        data["question"] = stem
+
+        # 2. Normalize options: extract text from dicts/objects and filter empty
+        raw_options = data.get("options", [])
+        clean_options: List[str] = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if isinstance(opt, dict):
+                    t = opt.get("text") or opt.get("label") or opt.get("value") or opt.get("option_text") or ""
+                    cleaned_opt = str(t).strip()
+                    if cleaned_opt:
+                        clean_options.append(cleaned_opt)
+                elif opt is not None:
+                    cleaned_opt = str(opt).strip()
+                    if cleaned_opt:
+                        clean_options.append(cleaned_opt)
+        elif isinstance(raw_options, (str, bytes)):
+            cleaned_opt = str(raw_options).strip()
+            if cleaned_opt:
+                clean_options.append(cleaned_opt)
+        data["options"] = clean_options
+
+        # 3. Determine q_type
+        raw_q_type = data.get("q_type")
+        q_type_str = str(raw_q_type).strip().lower() if raw_q_type is not None else ""
+        if not q_type_str or q_type_str == "auto":
+            q_type_str = "mcq"
+
+        # 4. Handle empty stem and empty options
+        if not stem and not clean_options:
+            raise ValueError("No question text or options detected on page")
+
+        # 5. Auto-coerce mcq to text if options are empty but stem is non-empty
+        if q_type_str == "mcq" and len(clean_options) == 0 and stem:
+            q_type_str = "text"
+
+        data["q_type"] = q_type_str
+
+        # 6. Normalize image_data, image_url, and compute image_hash
+        img_url = data.get("image_url") or data.get("img_url")
+        if img_url and isinstance(img_url, str) and img_url.strip():
+            data["image_url"] = img_url.strip()
+
+        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
+        if img and isinstance(img, str) and img.strip():
+            data["image_data"] = img.strip()
+        elif "images" in data and isinstance(data["images"], list) and data["images"]:
+            first_img = str(data["images"][0]).strip()
+            if first_img:
+                data["image_data"] = first_img
+        elif data.get("image_url"):
+            data["image_data"] = data["image_url"]
+
+        if data.get("image_data"):
+            import hashlib
+            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
+
+        return data
 
     @field_validator("subject", mode="before")
     @classmethod

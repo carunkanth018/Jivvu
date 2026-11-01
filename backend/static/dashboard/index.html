@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QuizZy Observability Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body class="dark-theme">
+  <div class="app-container">
+    <!-- Top Global Header -->
+    <header class="top-nav">
+      <div class="brand-group">
+        <div class="brand-logo">
+          <span class="logo-bolt">⚡</span>
+          <div class="brand-meta">
+            <h1 class="brand-title">QuizZy <span class="brand-sub">Observability</span></h1>
+            <span class="brand-tagline">Real-Time Backend Telemetry & Reliability</span>
+          </div>
+        </div>
+        <!-- Backend Status Pill -->
+        <div id="backend-status-pill" class="status-pill status-pill-loading">
+          <span class="pulse-indicator"></span>
+          <span id="backend-status-text" class="status-text">CHECKING BACKEND...</span>
+        </div>
+      </div>
+
+      <div class="controls-group">
+        <!-- Model Selection Dropdown -->
+        <div class="model-selector" title="Select LLM model solver cascade">
+          <label for="model-select" class="control-label">Model:</label>
+          <select id="model-select" class="styled-select model-dropdown">
+            <option value="auto" selected>⚡ Auto (Intelligent Cascade)</option>
+            <optgroup label="Primary Profiles">
+              <option value="primary_a">Primary A (openai/gpt-oss-120b)</option>
+              <option value="primary_b">Primary B (qwen/qwen3.8-27b)</option>
+            </optgroup>
+            <optgroup label="Provider Modes">
+              <option value="groq_only">Groq Only (All Groq Cascade)</option>
+              <option value="openrouter_only">OpenRouter Only (All OpenRouter Cascade)</option>
+            </optgroup>
+            <optgroup label="Specific Groq Models">
+              <option value="groq:openai/gpt-oss-120b">Groq: openai/gpt-oss-120b</option>
+              <option value="groq:qwen/qwen3.8-27b">Groq: qwen/qwen3.8-27b</option>
+              <option value="groq:openai/gpt-oss-20b">Groq: openai/gpt-oss-20b</option>
+            </optgroup>
+            <optgroup label="Specific OpenRouter Models">
+              <option value="openrouter:nvidia/nemotron-3.5-super-vl:free">OpenRouter: nemotron-3.5-super-vl</option>
+              <option value="openrouter:nvidia/nemotron-3.5-lightning:free">OpenRouter: nemotron-3.5-lightning</option>
+              <option value="openrouter:google/gemma-4-31b-it:free">OpenRouter: gemma-4-31b-it</option>
+              <option value="openrouter:liquid/lfm-2.5-2.6b:free">OpenRouter: lfm-2.5-2.6b</option>
+              <option value="openrouter:nvidia/nemotron-3-ultra-550b-a55b:free">OpenRouter: nemotron-3-ultra-550b</option>
+              <option value="openrouter:nvidia/nemotron-3-super-120b-a12b:free">OpenRouter: nemotron-3-super-120b</option>
+              <option value="openrouter:google/gemma-4-26b-a4b-it:free">OpenRouter: gemma-4-26b-a4b-it</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <!-- Time Window Filter -->
+        <div class="window-selector">
+          <label for="time-window" class="control-label">Window:</label>
+          <select id="time-window" class="styled-select">
+            <option value="all" selected>All Time</option>
+            <option value="24h">Last 24 Hours</option>
+            <option value="1h">Last 1 Hour</option>
+          </select>
+        </div>
+
+        <!-- Auto-Refresh Toggle -->
+        <div class="toggle-container" title="Poll telemetry every 2 seconds">
+          <input type="checkbox" id="auto-refresh-toggle" checked>
+          <label for="auto-refresh-toggle" class="toggle-label">
+            <span class="toggle-slider"></span>
+            <span class="toggle-text">Live (2s)</span>
+          </label>
+        </div>
+
+        <!-- Refresh Now Button -->
+        <button id="btn-refresh" class="btn btn-secondary" title="Force refresh telemetry">
+          <span class="btn-icon">🔄</span> Refresh
+        </button>
+
+        <!-- Clear Logs Button -->
+        <button id="btn-clear" class="btn btn-danger-outline" title="Clear recorded telemetry logs">
+          <span class="btn-icon">🗑️</span> Clear
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- 6 Primary KPI Cards -->
+      <section class="kpi-grid">
+        <!-- 1. Overall Performance -->
+        <div class="kpi-card performance-card" id="card-perf">
+          <div class="kpi-header">
+            <span class="kpi-title">Overall Performance</span>
+            <span id="health-grade-badge" class="badge badge-grade">--</span>
+          </div>
+          <div class="kpi-value-row">
+            <span id="perf-score" class="kpi-huge">--</span>
+            <span class="kpi-unit">/ 100</span>
+          </div>
+          <div class="progress-bar-container">
+            <div id="perf-progress-bar" class="progress-bar-fill progress-emerald" style="width: 0%"></div>
+          </div>
+          <div class="kpi-footer-note">
+            <span>50% Accuracy • 30% Success • 20% Latency</span>
+          </div>
+        </div>
+
+        <!-- 2. Total Requests -->
+        <div class="kpi-card" id="card-requests">
+          <div class="kpi-header">
+            <span class="kpi-title">Total Requests</span>
+            <span class="card-icon">📊</span>
+          </div>
+          <div class="kpi-value-row">
+            <span id="total-requests" class="kpi-huge">0</span>
+          </div>
+          <div class="kpi-sub-badges">
+            <span class="sub-badge badge-success">
+              <span class="dot-indicator dot-green"></span>
+              <span id="success-count">0</span> Success
+            </span>
+            <span class="sub-badge badge-failure">
+              <span class="dot-indicator dot-red"></span>
+              <span id="failure-count">0</span> Failed
+            </span>
+          </div>
+        </div>
+
+        <!-- 3. Success vs Error Rate -->
+        <div class="kpi-card" id="card-rates">
+          <div class="kpi-header">
+            <span class="kpi-title">Success vs. Error Rate</span>
+            <span class="card-icon">🎯</span>
+          </div>
+          <div class="kpi-split-row">
+            <div class="split-col">
+              <span class="split-label text-success">Success Rate</span>
+              <span id="success-rate" class="split-val text-success">100.0%</span>
+            </div>
+            <div class="split-col">
+              <span class="split-label text-danger">Error Rate</span>
+              <span id="error-rate" class="split-val text-danger">0.0%</span>
+            </div>
+          </div>
+          <div class="split-bar-container">
+            <div id="split-bar-success" class="split-bar-success" style="width: 100%"></div>
+            <div id="split-bar-error" class="split-bar-error" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- 4. Accuracy (Strict Non-Hallucination) -->
+        <div class="kpi-card" id="card-accuracy">
+          <div class="kpi-header">
+            <span class="kpi-title">Strict Accuracy Rate</span>
+            <span class="badge badge-shield" title="Zero-Hallucination Option Validation">🛡️ Zero-Hallucination</span>
+          </div>
+          <div class="kpi-value-row">
+            <span id="accuracy-rate" class="kpi-huge text-emerald">100.0%</span>
+          </div>
+          <div class="progress-bar-container">
+            <div id="accuracy-progress-bar" class="progress-bar-fill progress-emerald" style="width: 100%"></div>
+          </div>
+          <div class="kpi-footer-note">
+            <span><strong id="accurate-count">0</strong> validated non-hallucinated answers</span>
+          </div>
+        </div>
+
+        <!-- 5. Latency Metrics -->
+        <div class="kpi-card" id="card-latency">
+          <div class="kpi-header">
+            <span class="kpi-title">Average Latency</span>
+            <span class="card-icon">⚡</span>
+          </div>
+          <div class="kpi-value-row">
+            <span id="avg-latency" class="kpi-huge text-cyan">0</span>
+            <span class="kpi-unit">ms</span>
+          </div>
+          <div class="latency-metrics-sub">
+            <span class="latency-sub-item">P95: <strong id="p95-latency">0 ms</strong></span>
+            <span class="latency-sub-item">Min: <strong id="min-latency">0 ms</strong></span>
+            <span class="latency-sub-item">Max: <strong id="max-latency">0 ms</strong></span>
+          </div>
+        </div>
+
+        <!-- 6. Backend Status Card -->
+        <div class="kpi-card" id="card-backend">
+          <div class="kpi-header">
+            <span class="kpi-title">Backend Status</span>
+            <span class="card-icon">🖥️</span>
+          </div>
+          <div class="kpi-value-row">
+            <span id="backend-status-card-label" class="kpi-huge status-label-pill">--</span>
+          </div>
+          <div class="backend-details-sub">
+            <div>Port: <strong>8000</strong> (<span id="backend-ping-ms">-- ms</span>)</div>
+            <div>Model: <strong id="backend-active-model-badge">Auto</strong></div>
+            <div>Uptime: <strong id="backend-uptime">--</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Visual Analytics Row: Error Breakdown & Latency Timeline -->
+      <section class="analytics-row">
+        <!-- Error Types Breakdown Panel -->
+        <div class="panel-card error-breakdown-panel">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-icon">⚠️</span>
+              <h2 class="panel-title">Deterministic Error Breakdown</h2>
+            </div>
+            <span class="panel-caption">Automated fault classification across all solve attempts</span>
+          </div>
+          <div id="error-breakdown-list" class="error-breakdown-container">
+            <!-- Dynamic Error Bars injected here -->
+          </div>
+        </div>
+
+        <!-- Latency & Outcome Timeline -->
+        <div class="panel-card timeline-panel">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-icon">📈</span>
+              <h2 class="panel-title">Recent Request Stream (Last 50)</h2>
+            </div>
+            <div class="legend-group">
+              <span class="legend-item"><span class="legend-dot bg-emerald"></span> Accurate</span>
+              <span class="legend-item"><span class="legend-dot bg-amber"></span> Hallucinated</span>
+              <span class="legend-item"><span class="legend-dot bg-rose"></span> Failed</span>
+            </div>
+          </div>
+          <div id="timeline-chart" class="timeline-visual-container">
+            <div class="timeline-empty-state">No requests recorded in window yet.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Requests Inspection Table Section -->
+      <section class="table-section">
+        <div class="table-toolbar">
+          <div class="toolbar-title-group">
+            <span class="panel-icon">🔍</span>
+            <h2 class="panel-title">Request Telemetry Logs</h2>
+            <span id="logs-count-badge" class="badge badge-counter">0 logs</span>
+          </div>
+
+          <div class="toolbar-filters">
+            <!-- Search -->
+            <div class="search-input-wrapper">
+              <span class="search-icon">🔎</span>
+              <input type="text" id="search-input" placeholder="Search questions, answers, models..." class="search-input">
+            </div>
+
+            <!-- Status Filter -->
+            <select id="filter-status" class="styled-select filter-select">
+              <option value="">Status: All</option>
+              <option value="SUCCESS">Success Only</option>
+              <option value="FAILURE">Failure Only</option>
+            </select>
+
+            <!-- Error Type Filter -->
+            <select id="filter-error-type" class="styled-select filter-select">
+              <option value="">Error Type: All</option>
+              <option value="NONE">NONE (Valid Answer)</option>
+              <option value="HALLUCINATED_OPTION">HALLUCINATED_OPTION</option>
+              <option value="EMPTY_ANSWER">EMPTY_ANSWER</option>
+              <option value="LLM_TIMEOUT">LLM_TIMEOUT</option>
+              <option value="RATE_LIMIT_429">RATE_LIMIT_429</option>
+              <option value="SCHEMA_PARSE_ERROR">SCHEMA_PARSE_ERROR</option>
+              <option value="VALIDATION_ERROR">VALIDATION_ERROR</option>
+              <option value="PROVIDER_API_ERROR">PROVIDER_API_ERROR</option>
+              <option value="INTERNAL_SERVER_ERROR">INTERNAL_SERVER_ERROR</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="telemetry-table" id="telemetry-table">
+            <thead>
+              <tr>
+                <th style="width: 60px">ID</th>
+                <th style="width: 90px">Time</th>
+                <th style="width: 80px">Type</th>
+                <th>Question Snippet</th>
+                <th>Selected Answer</th>
+                <th style="width: 110px">Accuracy</th>
+                <th style="width: 90px">Status</th>
+                <th style="width: 170px">Error Type</th>
+                <th style="width: 90px">Latency</th>
+                <th style="width: 130px">Model / Cache</th>
+              </tr>
+            </thead>
+            <tbody id="telemetry-tbody">
+              <tr>
+                <td colspan="10" class="table-loading-cell">Loading request logs...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Deep Request Inspector Drawer / Modal -->
+    <div id="inspector-modal" class="modal-overlay hidden">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <span class="modal-badge-id" id="modal-req-id">REQ #--</span>
+            <h3 class="modal-title">Request Inspection Details</h3>
+          </div>
+          <button id="modal-close-btn" class="modal-close" title="Close inspector (ESC)">&times;</button>
+        </div>
+
+        <div class="modal-body" id="modal-content">
+          <!-- Dynamic Request Details Injected Here -->
+        </div>
+
+        <div class="modal-footer">
+          <button id="modal-done-btn" class="btn btn-secondary">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
+

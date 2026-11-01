@@ -2913,7 +2913,13 @@
                 ordered_texts: desiredTargets,
                 options: payload.options
               }
-            }, (res) => resolve(res));
+            }, (res) => {
+              if (chrome.runtime.lastError) {
+                resolve(null);
+                return;
+              }
+              resolve(res);
+            });
           });
           const bgRes = await Promise.race([
             bgPromise,
@@ -4685,6 +4691,10 @@
             type: "READ_CODE_EDITOR_MAIN"
           }, (res) => {
             clearTimeout(timeout);
+            if (chrome.runtime.lastError) {
+              resolve(null);
+              return;
+            }
             resolve(res);
           });
         });
@@ -4733,6 +4743,10 @@
             preserveBoilerplate: payload ? payload.preserveBoilerplate !== false : true
           }, (res) => {
             clearTimeout(timeout);
+            if (chrome.runtime.lastError) {
+              resolve(null);
+              return;
+            }
             resolve(res);
           });
         });

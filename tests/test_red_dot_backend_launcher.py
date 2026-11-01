@@ -36,7 +36,7 @@ def test_native_host_manifest_and_registry():
 
     assert data.get("name") == "com.quizzy.launcher"
     assert data.get("type") == "stdio"
-    assert "path" in data and Path(data["path"]).name == "launcher.bat"
+    assert "path" in data and Path(data["path"]).name in ("native_host_win.exe", "launcher.bat")
     assert "allowed_origins" in data and len(data["allowed_origins"]) > 0
 
     if sys.platform == "win32":

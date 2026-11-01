@@ -36,6 +36,8 @@ eval/results/*.json
 backend/server.log
 backend/server.err.log
 backend/supervisor.lock
+backend/runtime_state.json
+backend/native_host_silent.exe
 *.log
 
 # IDE, Editor, & OS metadata
@@ -45,3 +47,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+*.egg-info/

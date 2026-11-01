@@ -452,18 +452,18 @@
       },
       solve: () => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { if (chrome.runtime.lastError) {} });
         }
       },
       apply: () => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { if (chrome.runtime.lastError) {} });
         }
       },
       skip: () => { },
       next: () => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { if (chrome.runtime.lastError) {} });
         }
       },
       startAuto: () => {
@@ -498,7 +498,7 @@
         inst.isAutoRunning = false;
         inst.updateDotState();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "STOP_AUTO" }, () => { });
+          chrome.runtime.sendMessage({ action: "STOP_AUTO" }, () => { if (chrome.runtime.lastError) {} });
         }
       },
       updateDotState: () => { },
@@ -519,21 +519,9 @@
             return;
           } catch (_) {}
         }
-        if (typeof fetch === "function") {
-          fetch("http://127.0.0.1:8000/health", { method: "GET" })
-            .then(res => res.json())
-            .then(data => {
-              const ok = Boolean(data && data.status === "ok");
-              inst.isBackendOnline = ok;
-              inst.updateDotState();
-              if (cb) cb(ok);
-            })
-            .catch(() => {
-              inst.isBackendOnline = false;
-              inst.updateDotState();
-              if (cb) cb(false);
-            });
-        }
+        inst.isBackendOnline = false;
+        inst.updateDotState();
+        if (cb) cb(false);
       },
       destroy: () => {
         if (inst.__codingHealthInterval__) {
@@ -746,23 +734,10 @@
         } catch (_) {}
       }
 
-      if (typeof fetch === "function") {
-        fetch("http://127.0.0.1:8000/health", { method: "GET" })
-          .then(res => res.json())
-          .then(data => {
-            const ok = Boolean(data && data.status === "ok");
-            const currentInst = getActiveCodingHudInstance();
-            if (currentInst) currentInst.isBackendOnline = ok;
-            updateCodingDotState();
-            if (cb) cb(ok);
-          })
-          .catch(() => {
-            const currentInst = getActiveCodingHudInstance();
-            if (currentInst) currentInst.isBackendOnline = false;
-            updateCodingDotState();
-            if (cb) cb(false);
-          });
-      }
+      const currentInst = getActiveCodingHudInstance();
+      if (currentInst) currentInst.isBackendOnline = false;
+      updateCodingDotState();
+      if (cb) cb(false);
     };
 
     if (inst) {
@@ -826,7 +801,7 @@
       const hud = getActiveCodingHudInstance();
       if (e.key === "Escape" || e.key === "Esc") {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "KILL_SWITCH_TRIGGERED", reason: "Escape hotkey" }, () => { });
+          chrome.runtime.sendMessage({ action: "KILL_SWITCH_TRIGGERED", reason: "Escape hotkey" }, () => { if (chrome.runtime.lastError) {} });
         }
         if (hud && hud.isAutoRunning) {
           hud.stopAuto();
@@ -845,6 +820,11 @@
         ctrlComboUsed = false;
         return;
       } else if (isShift) {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        if (isEditableElement(e.target) || isEditableElement(activeEl) || e.ctrlKey || e.altKey || e.metaKey) {
+          shiftComboUsed = true;
+          return;
+        }
         if (shiftDown) return;
         shiftDown = true;
         shiftComboUsed = false;
@@ -863,7 +843,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { if (chrome.runtime.lastError) {} });
         }
         return;
       }
@@ -871,7 +851,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { if (chrome.runtime.lastError) {} });
         }
         return;
       }
@@ -879,7 +859,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { });
+          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { if (chrome.runtime.lastError) {} });
         }
         return;
       }
@@ -887,7 +867,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "OPEN_POPUP_HUD", force: true }, () => { });
+          chrome.runtime.sendMessage({ action: "OPEN_POPUP_HUD", force: true }, () => { if (chrome.runtime.lastError) {} });
         }
         return;
       }
@@ -920,8 +900,17 @@
           }
         }
       } else if (isShift) {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        if (isEditableElement(e.target) || isEditableElement(activeEl)) {
+          shiftDown = false;
+          shiftComboUsed = true;
+          return;
+        }
+        const wasDown = shiftDown;
+        const wasCombo = shiftComboUsed;
         shiftDown = false;
-        if (!shiftComboUsed) {
+        shiftComboUsed = false;
+        if (wasDown && !wasCombo) {
           lastStealthHandledEvent = e;
           e.__quizzy_handled__ = true;
 
@@ -936,7 +925,6 @@
             }
           }
         }
-        shiftComboUsed = false;
       }
     };
 
@@ -1755,6 +1743,8 @@
   let autoRetryCount = 0;
   let latestSolution = null;
   let latestExtracted = null;
+  let lastSolvedSignature = "";
+  let lastSolvedTime = 0;
   let isSidePanelOpen = false;
   let backendOnline = false;
   let autoErrorOccurred = false;
@@ -2126,9 +2116,17 @@
   // ==========================================================================
   function getQuestionSig(ext) {
     if (!ext) return "";
-    const q = (ext.question || "").trim();
+    let q = (ext.question || "").trim();
+    if (q.includes("[CODE SNIPPET]:")) {
+      const parts = q.split("[CODE SNIPPET]:");
+      const basePrompt = parts[0].trim();
+      const codeLines = (parts[1] || "").trim().split("\n");
+      const firstLine = codeLines.length > 0 ? codeLines[0].trim() : "";
+      q = `${basePrompt}::${firstLine}`;
+    }
     const opts = Array.isArray(ext.options) ? ext.options.join("|") : "";
-    return `${q}::${opts}`;
+    const img = ext.image_url || (ext.image_data ? ext.image_data.length : "");
+    return `${q}::${opts}::${img}`;
   }
 
   // ==========================================================================
@@ -2308,16 +2306,40 @@
     return null;
   }
 
+  function isValidExtractedQuestion(q) {
+    if (window.__QuizZyExtractor && typeof window.__QuizZyExtractor.isValidExtractedQuestion === "function") {
+      return window.__QuizZyExtractor.isValidExtractedQuestion(q);
+    }
+    if (!q) return false;
+    const stem = (q.stem || q.question_text || q.question || "").trim();
+    if (stem.length < 2) return false;
+    const type = (q.q_type || "mcq").toLowerCase();
+    if (["mcq", "multi", "order"].includes(type)) {
+      const validOpts = Array.isArray(q.options)
+        ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+        : [];
+      if (validOpts.length < 2) return false;
+    }
+    return true;
+  }
+
   function solveCurrentQuestion(callback) {
     if (isSolving) return;
     const extracted = extractCurrentQuiz();
 
-    if (!extracted || !extracted.success) {
+    if (!extracted || !extracted.success || !isValidExtractedQuestion(extracted)) {
       if (answerText) {
         answerText.className = "hud-answer-text uncertain";
-        answerText.textContent = "No quiz question found on page";
+        answerText.textContent = "No quiz question detected on page";
       }
       if (callback) callback(null, extracted);
+      return;
+    }
+
+    const currentSig = getQuestionSig(extracted);
+    const nowTs = Date.now();
+    if (latestSolution && currentSig && currentSig === lastSolvedSignature && (nowTs - lastSolvedTime) < 3500) {
+      if (callback) callback(latestSolution, extracted);
       return;
     }
 
@@ -2329,7 +2351,10 @@
       question: extracted.question,
       options: extracted.options || [],
       language: (extracted && extracted.language) ? extracted.language : null,
-      starter_code: (extracted && extracted.starter_code) ? extracted.starter_code : null
+      starter_code: (extracted && extracted.starter_code) ? extracted.starter_code : null,
+      image_data: (extracted && extracted.image_data) ? extracted.image_data : null,
+      image_url: (extracted && extracted.image_url) ? extracted.image_url : null,
+      meta: (extracted && extracted.meta) ? extracted.meta : null
     };
 
     let solveTimedOut = false;
@@ -2339,15 +2364,15 @@
       isSolving = false;
       if (isAutoRunning) {
         autoErrorOccurred = true;
-        autoErrorMessage = "Question solve timed out (>5s)";
+        autoErrorMessage = "Question solve timed out (>22s)";
       }
       checkHealth();
       if (answerText) {
         answerText.className = "hud-answer-text uncertain";
-        answerText.textContent = "Question solve timed out (>5s)";
+        answerText.textContent = "Question solve timed out (>22s)";
       }
-      if (callback) callback({ error: "Question solve timed out (>5s)" }, extracted);
-    }, 5000);
+      if (callback) callback({ error: "Question solve timed out (>22s)" }, extracted);
+    }, 22000);
 
     sendExtensionMessage({ action: "SOLVE_REQUEST", payload }, (res) => {
       if (solveTimedOut) return;
@@ -2356,16 +2381,36 @@
       if (!res || !res.success || !res.data) {
         isSolving = false;
         const errMsg = (res && res.error) ? String(res.error) : "Backend solve error";
+        const isRateLimited = (res && res.status === 429) || errMsg.includes("429") || errMsg.toLowerCase().includes("rate limit");
+
+        if (isRateLimited) {
+          if (answerText) {
+            answerText.className = "hud-answer-text uncertain";
+            answerText.textContent = "Rate limit cooldown (10s)...";
+          }
+          if (isAutoRunning) {
+            autoErrorOccurred = false;
+            autoErrorMessage = "Rate limit cooldown";
+            updateDotState();
+            setTimeout(() => {
+              if (isAutoRunning) {
+                runAutoStep();
+              }
+            }, 10000);
+            return;
+          }
+        }
+
         if (errMsg.toLowerCase().includes("fetch") || errMsg.toLowerCase().includes("network") || errMsg.toLowerCase().includes("connect") || errMsg.toLowerCase().includes("offline")) {
           backendOnline = false;
         }
-        if (isAutoRunning) {
+        if (isAutoRunning && !isRateLimited) {
           autoErrorOccurred = true;
           autoErrorMessage = errMsg;
         }
         updateDotState();
         checkHealth();
-        if (answerText) {
+        if (answerText && !isRateLimited) {
           answerText.className = "hud-answer-text uncertain";
           answerText.textContent = errMsg;
         }
@@ -2374,6 +2419,8 @@
       }
 
       backendOnline = true;
+      lastSolvedSignature = currentSig;
+      lastSolvedTime = Date.now();
       renderSolution(res.data, extracted);
       if (callback) callback(res.data, extracted);
     });
@@ -2559,11 +2606,16 @@
     // Auto-allowlist current host
     const currentHost = (window.location && window.location.hostname) ? window.location.hostname.toLowerCase() : "";
     if (currentHost && storage && storage.get) {
-      storage.get(["allowedHosts"], (data) => {
+      storage.get(["allowedHosts", "auto_mode_allowlist"], (data) => {
         const list = data.allowedHosts || [];
         if (!list.includes(currentHost)) {
           list.push(currentHost);
           storage.set({ allowedHosts: list });
+        }
+        const autoList = data.auto_mode_allowlist || [];
+        if (!autoList.includes(currentHost)) {
+          autoList.push(currentHost);
+          storage.set({ auto_mode_allowlist: autoList });
         }
       });
     }
@@ -2657,15 +2709,15 @@
       );
 
       if (!hasValidSelection) {
-        // If question cannot be parsed or solved yet, keep polling until valid
-        // or stop after retries to prevent skipping!
+        // If question cannot be parsed or solved yet (e.g. rate-limit or loading), back off 10s
         if (!stepSettled && isAutoRunning && currentEpoch === autoStepEpoch) {
           autoErrorOccurred = true;
-          autoErrorMessage = "Cannot solve question or consensus missing";
+          autoErrorMessage = "Cannot solve question or rate limit backoff";
           updateDotState();
-          if (autoRetryCount < 8) {
+          if (autoRetryCount < 2) {
             autoRetryCount++;
-            setTimeout(runAutoStep, 350);
+            console.warn("[QuizZy HUD] Solve failed/empty, backing off 10s before retry (" + autoRetryCount + "/2)...");
+            setTimeout(runAutoStep, 10000);
             return;
           }
           stepSettled = true;
@@ -2882,7 +2934,7 @@
                 payload: Object.assign({
                   subject: "Coding Practice",
                   q_type: "code",
-                  question: extracted ? extracted.question : "",
+                  question: (extracted && extracted.question) ? extracted.question : "Coding Practice Problem",
                   language: extracted ? extracted.language : null,
                   starter_code: extracted ? extracted.starter_code : null
                 }, solvePayload)
@@ -3231,6 +3283,11 @@
     }
 
     if (isShift) {
+      const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+      if (isEditableElement(e.target) || isEditableElement(activeEl) || e.ctrlKey || e.altKey || e.metaKey) {
+        shiftComboUsed = true;
+        return;
+      }
       if (shiftDown) return;
       shiftDown = true;
       shiftComboUsed = false;
@@ -3287,11 +3344,19 @@
         handleModifierDoubleTap("Alt", e);
       }
     } else if (isShift) {
+      const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+      if (isEditableElement(e.target) || isEditableElement(activeEl)) {
+        shiftDown = false;
+        shiftComboUsed = true;
+        return;
+      }
+      const wasDown = shiftDown;
+      const wasCombo = shiftComboUsed;
       shiftDown = false;
-      if (!shiftComboUsed) {
+      shiftComboUsed = false;
+      if (wasDown && !wasCombo) {
         executeModifierAction("Shift", false, e);
       }
-      shiftComboUsed = false;
     } else if (isFnKey(e)) {
       fnDown = false;
       if (!fnComboUsed) {

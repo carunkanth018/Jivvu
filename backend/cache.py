@@ -116,10 +116,12 @@ def compute_cache_key(
     options: List[str],
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
+    image_data: Optional[str] = None,
 ) -> str:
     """
     Deterministic order-invariant cache key:
     - Normalizes subject and question.
+    - If image_data is provided, includes a SHA-256 digest of image_data.
     - For code: hashes subject, 'code', question, language, and starter_code.
     - For mcq and order: normalizes each option string and sorts alphabetically.
     - For text: options list is empty.
@@ -129,10 +131,14 @@ def compute_cache_key(
     norm_type = q_type.strip().lower()
     norm_question = normalize_text_answer(question)
 
+    img_hash = ""
+    if image_data and str(image_data).strip():
+        img_hash = hashlib.sha256(str(image_data).strip().encode("utf-8")).hexdigest()[:16]
+
     if norm_type == "code":
         lang = (language or "").strip().lower()
         starter = (starter_code or "").strip()
-        payload = f"{norm_subject}|code|{norm_question}|{lang}|{starter}".encode("utf-8")
+        payload = f"{norm_subject}|code|{norm_question}|{lang}|{starter}|{img_hash}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
     elif norm_type in ("mcq", "order", "multi") and options:
         norm_opts = sorted([normalize_text_answer(opt) for opt in options])
@@ -140,7 +146,7 @@ def compute_cache_key(
     else:
         opts_repr = "[]"
 
-    payload = f"{norm_subject}|{norm_type}|{norm_question}|{opts_repr}".encode("utf-8")
+    payload = f"{norm_subject}|{norm_type}|{norm_question}|{opts_repr}|{img_hash}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -152,6 +158,7 @@ def get_cached_solution(
     db_path: Optional[str] = None,
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
+    image_data: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Lookup answer in SQLite cache and dynamically remap synthetic keys
@@ -163,6 +170,7 @@ def get_cached_solution(
         subject, q_type, question, options,
         language=language,
         starter_code=starter_code,
+        image_data=image_data,
     )
     norm_type = q_type.strip().lower()
 
@@ -285,7 +293,15 @@ def get_cached_solution(
             "confidence_tier": row["confidence_tier"],
             "confidence_label": row["confidence_label"],
             "confidence_score": float(row["confidence_score"]),
-            "auto_eligible": (row["confidence_tier"] in ("HIGH_BOTH_AGREE", "USER_VERIFIED_OVERRIDE", "MEDIUM_TIEBREAKER_AGREE", "MEDIUM_SEARXNG_GROUNDED")),
+            "auto_eligible": (
+                row["confidence_tier"].startswith("HIGH_")
+                or row["confidence_tier"] in (
+                    "USER_VERIFIED_OVERRIDE",
+                    "MEDIUM_TIEBREAKER_AGREE",
+                    "MEDIUM_SEARXNG_GROUNDED",
+                    "SINGLE_PRIMARY_PASSED",
+                )
+            ),
             "cache_hit": True,
             "models_called": [],
             "hit_count": row["hit_count"] + 1,
@@ -303,21 +319,25 @@ def cache_solution(
     db_path: Optional[str] = None,
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
+    image_data: Optional[str] = None,
 ) -> bool:
     """
     Zero-Poison Rule:
-    Writes to solve_cache ONLY if confidence_tier is HIGH_BOTH_AGREE,
-    MEDIUM_TIEBREAKER_AGREE, or MEDIUM_SEARXNG_GROUNDED.
+    Writes to solve_cache ONLY if confidence_tier is high or medium.
     Never caches LOW_FALLBACK_RESCUE or UNCERTAIN_*.
     """
     init_db(db_path)
     tier = getattr(solver_res, "confidence_tier", "")
     status = getattr(solver_res, "status", "")
 
-    if status.upper() != "OK" or tier not in (
-        "HIGH_BOTH_AGREE",
-        "MEDIUM_TIEBREAKER_AGREE",
-        "MEDIUM_SEARXNG_GROUNDED",
+    if status.upper() != "OK" or not (
+        tier.startswith("HIGH_")
+        or tier in (
+            "MEDIUM_TIEBREAKER_AGREE",
+            "MEDIUM_SEARXNG_GROUNDED",
+            "USER_VERIFIED_OVERRIDE",
+            "SINGLE_PRIMARY_PASSED",
+        )
     ):
         return False
 
@@ -377,8 +397,9 @@ def cache_solution(
         subject, q_type, question, options,
         language=language,
         starter_code=starter_code,
+        image_data=image_data,
     )
-    if tier == "HIGH_BOTH_AGREE":
+    if tier.startswith("HIGH_"):
         score = 1.0
         label = "high"
     elif tier == "MEDIUM_SEARXNG_GROUNDED":
@@ -436,6 +457,7 @@ def record_wrong_answer(
     db_path: Optional[str] = None,
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
+    image_data: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Record a wrong answer report with order-invariant cache key.
@@ -450,6 +472,7 @@ def record_wrong_answer(
         subject, q_type, question, options,
         language=language,
         starter_code=starter_code,
+        image_data=image_data,
     )
     norm_type = q_type.strip().lower()
     options_json = json.dumps(options or [])

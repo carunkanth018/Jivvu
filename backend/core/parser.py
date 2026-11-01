@@ -125,11 +125,12 @@ def extract_json_candidate(text: str) -> str:
     raise ParseError(f"No JSON object found in raw LLM output: {raw_str[:120]}...")
 
 
-def parse_llm_response(raw_text: str) -> ParsedLLMResponse:
+def parse_llm_response(raw_text: str, options: Optional[List[str]] = None) -> ParsedLLMResponse:
     """
     Parse and validate raw LLM completion string.
     Ensures 'answer' and 'reason' exist and are non-empty.
-    Supports ast.literal_eval, key normalizations, and regex fallback for resilient extraction.
+    Supports ast.literal_eval, key normalizations, reasoning/workspace deduction,
+    and regex fallback for resilient extraction.
     """
     verification_workspace: Optional[str] = None
     vw_match = re.search(r"<verification_workspace>\s*([\s\S]*?)\s*(?:</verification_workspace>|$)", raw_text, re.IGNORECASE)
@@ -151,44 +152,80 @@ def parse_llm_response(raw_text: str) -> ParsedLLMResponse:
             except Exception:
                 pass
 
-        # Fallback 2: regex extract 'answer' and 'reason' from raw_text
+        # Fallback 2: regex extract 'answer' and 'reason' from raw_text or verification_workspace
         if not data:
-            ans_match = re.search(
-                r'["\'](?:answer|correctAnswer|correctOptionId)["\']\s*:\s*(?:"([^"]+)"|\'([^\']+)\'|([A-Fa-f0-9]+)|\[([^\]]+)\])',
-                raw_text,
-                re.IGNORECASE,
-            )
-            reason_match = re.search(
-                r'["\'](?:reason|explanation|reasoning_summary)["\']\s*:\s*(?:"([^"]+)"|\'([^\']+)\')',
-                raw_text,
-                re.IGNORECASE,
-            )
+            search_sources = []
+            if verification_workspace:
+                search_sources.append(verification_workspace)
+            search_sources.append(raw_text)
 
-            if ans_match:
-                extracted_ans = ans_match.group(1) or ans_match.group(2) or ans_match.group(3) or ans_match.group(4)
-                extracted_reason = ""
-                if reason_match:
-                    extracted_reason = reason_match.group(1) or reason_match.group(2) or ""
-                data = {
-                    "answer": extracted_ans.strip() if isinstance(extracted_ans, str) else extracted_ans,
-                    "reason": extracted_reason.strip() if extracted_reason else "Step-by-step derivation verified."
-                }
-            else:
-                # Fallback 3: resilient conclusion pattern search
-                concl_match = re.search(
-                    r'(?:correct\s+(?:answer|option|choice)\s+is|answer\s*[:\-]|option\s*[:\-]?|choice\s*[:\-]?|therefore|hence|thus)\s*[\(\[]?([A-Fa-f0-9])[\)\]]?(?:\s|$|\.|\,)',
-                    raw_text,
+            for src in search_sources:
+                ans_match = re.search(
+                    r'["\']?(?:answer|correctAnswer|correctOptionId)["\']?\s*[:=]\s*(?:"([^"]+)"|\'([^\']+)\'|([A-Fa-f0-9]+)|\[([^\]]+)\])',
+                    src,
                     re.IGNORECASE,
                 )
-                if concl_match:
-                    extracted_ans = concl_match.group(1).upper()
-                    extracted_reason = raw_text.strip()
+                reason_match = re.search(
+                    r'["\']?(?:reason|explanation|reasoning_summary)["\']?\s*[:=]\s*(?:"([^"]+)"|\'([^\']+)\')',
+                    src,
+                    re.IGNORECASE,
+                )
+
+                if ans_match:
+                    extracted_ans = ans_match.group(1) or ans_match.group(2) or ans_match.group(3) or ans_match.group(4)
+                    extracted_reason = ""
+                    if reason_match:
+                        extracted_reason = reason_match.group(1) or reason_match.group(2) or ""
                     data = {
-                        "answer": extracted_ans,
-                        "reason": extracted_reason if extracted_reason else "Step-by-step derivation verified."
+                        "answer": extracted_ans.strip() if isinstance(extracted_ans, str) else extracted_ans,
+                        "reason": extracted_reason.strip() if extracted_reason else "Step-by-step derivation verified."
                     }
-                else:
-                    raise ParseError(f"JSON decode failed and regex fallback could not find 'answer' in: '{raw_text[:120]}'")
+                    break
+
+            if not data:
+                # Fallback 3: resilient conclusion pattern search
+                conclusion_patterns = [
+                    r'(?:correct\s+(?:answer|option|choice)\s+is|answer\s*[:\-]|option\s*[:\-]?|choice\s*[:\-]?|therefore|hence|thus)\s*[\(\[]?([A-Fa-f0-9])[\)\]]?(?:\s|$|\.|\,)',
+                    r'(?:option|choice|answer)\s+([A-D])\s+(?:is\s+correct|is\s+the\s+correct|is\s+right)',
+                    r'\b([A-D])\s+is\s+(?:the\s+)?correct\s+(?:option|choice|answer)\b',
+                    r'[\(\[]([A-D])[\)\]]\s+(?:is\s+correct|is\s+the\s+correct)',
+                    r'(?:select|choose)\s+option\s+([A-D])\b',
+                    r'\b(?:final\s+answer|conclusion)\s*[:\-]?\s*[\(\[]?([A-D])[\)\]]?',
+                ]
+
+                for src in search_sources:
+                    for pat in conclusion_patterns:
+                        concl_match = re.search(pat, src, re.IGNORECASE)
+                        if concl_match:
+                            extracted_ans = concl_match.group(1).upper()
+                            extracted_reason = src.strip()
+                            data = {
+                                "answer": extracted_ans,
+                                "reason": extracted_reason if extracted_reason else "Step-by-step derivation verified."
+                            }
+                            break
+                    if data:
+                        break
+
+            # Fallback 4: option text substring matching in conclusion/reasoning
+            if not data and options and len(options) >= 2:
+                for idx, opt in enumerate(options):
+                    clean_opt = str(opt).strip()
+                    if clean_opt and len(clean_opt) >= 2:
+                        opt_pattern = r'\b' + re.escape(clean_opt) + r'\b'
+                        for src in search_sources:
+                            if re.search(opt_pattern, src, re.IGNORECASE):
+                                letter = chr(65 + idx)
+                                data = {
+                                    "answer": letter,
+                                    "reason": f"Matched deduction for option ({letter}) '{clean_opt}' in reasoning."
+                                }
+                                break
+                    if data:
+                        break
+
+            if not data:
+                raise ParseError(f"JSON decode failed and regex fallback could not find 'answer' in: '{raw_text[:120]}'")
 
     if not isinstance(data, dict):
         raise ParseError(f"Expected JSON object, got {type(data).__name__}")

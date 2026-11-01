@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+from pathlib import Path
+
+_UVICORN_LOG = Path(__file__).resolve().parent / "runtime_uvicorn.log"
+try:
+    if sys.stdout is None or not hasattr(sys.stdout, "write"):
+        sys.stdout = open(_UVICORN_LOG, "a", encoding="utf-8", buffering=1)
+    if sys.stderr is None or not hasattr(sys.stderr, "write"):
+        sys.stderr = open(_UVICORN_LOG, "a", encoding="utf-8", buffering=1)
+except Exception:
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+import asyncio
 import csv
 import hashlib
 import json
@@ -13,16 +31,26 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exception_handlers import (
+    http_exception_handler as _fastapi_http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.cache import (
     cache_solution,
+    compute_cache_key,
     get_cache_stats,
     get_cached_solution,
     get_wrong_answers,
     init_db,
     record_wrong_answer,
+)
+from backend.telemetry_db import (
+    record_request_log,
+    validate_accuracy_and_classify_error,
 )
 from backend.core.llm_client import (
     get_active_fallback_pool,
@@ -32,6 +60,12 @@ from backend.core.llm_client import (
 )
 from backend.core.normalizer import normalize_text_answer
 from backend.core.searxng_client import get_searxng_config, is_searxng_circuit_open
+from backend.model_manager import (
+    get_active_model_selection,
+    get_available_models_catalog,
+    get_model_display_label,
+    set_active_model_selection,
+)
 from backend.schemas import (
     DebugSolveResponse,
     FeedbackRequest,
@@ -57,6 +91,7 @@ def save_or_update_question_csv(
     """
     path = Path(csv_path) if csv_path else Path(__file__).resolve().parent.parent / "questions.csv"
     norm_type = q_type.strip().lower()
+    options = options or []
 
     # Format expected_answer
     if norm_type == "mcq":
@@ -168,6 +203,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+APP_START_TIME = time.time()
+
 # CORS: Allow localhost (any port) and Chrome extension origins
 app.add_middleware(
     CORSMiddleware,
@@ -178,14 +215,120 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_timing_middleware(request: Request, call_next):
+    """Record request arrival monotonic timestamp for accurate latency reporting on all outcomes."""
+    request.state.start_time = time.perf_counter()
+    return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Capture request validation errors into telemetry database with real latency and partial stem without altering 422 contract."""
+    path = request.url.path
+    if "/solve" in path and not getattr(request.state, "telemetry_logged", False):
+        request.state.telemetry_logged = True
+        start_t = getattr(request.state, "start_time", None)
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0 if start_t else 0.5
+        if elapsed_ms < 0.1:
+            elapsed_ms = 0.1
+        elapsed_ms = round(elapsed_ms, 2)
+
+        # Extract any partial question stem available in body
+        partial_stem = ""
+        q_type_val = "mcq"
+        options_list = None
+        subject_val = "General"
+        body = exc.body
+        if isinstance(body, dict):
+            for key in ("question", "stem", "question_text", "prompt", "text"):
+                val = body.get(key)
+                if val:
+                    cleaned = str(val).strip()
+                    if cleaned:
+                        partial_stem = cleaned
+                        break
+            if "q_type" in body and body["q_type"]:
+                q_type_val = str(body["q_type"])
+            if "subject" in body and body["subject"]:
+                subject_val = str(body["subject"])
+            opts = body.get("options")
+            if isinstance(opts, list):
+                options_list = [str(o) for o in opts]
+
+        # Extract human-readable error summary from exc.errors()
+        err_msgs = []
+        for err in exc.errors():
+            loc = " -> ".join(str(p) for p in err.get("loc", []) if p != "body")
+            msg = err.get("msg", "Validation error")
+            if loc:
+                err_msgs.append(f"Field '{loc}': {msg}")
+            else:
+                err_msgs.append(msg)
+        error_summary = "; ".join(err_msgs) if err_msgs else str(exc)
+
+        record_request_log(
+            endpoint=path,
+            subject=subject_val,
+            q_type=q_type_val,
+            question_text=partial_stem,
+            options=options_list,
+            status="FAILURE",
+            is_accurate=False,
+            error_type="VALIDATION_ERROR",
+            error_message=error_summary,
+            latency_ms=elapsed_ms,
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Capture HTTP exceptions into telemetry database with measured latency."""
+    path = request.url.path
+    if "/solve" in path and not getattr(request.state, "telemetry_logged", False):
+        request.state.telemetry_logged = True
+        start_t = getattr(request.state, "start_time", None)
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0 if start_t else 0.5
+        if elapsed_ms < 0.1:
+            elapsed_ms = 0.1
+        elapsed_ms = round(elapsed_ms, 2)
+
+        err_type = (
+            "VALIDATION_ERROR"
+            if exc.status_code in (400, 422)
+            else (
+                "RATE_LIMIT_429"
+                if exc.status_code == 429
+                else (
+                    "PROVIDER_API_ERROR"
+                    if exc.status_code >= 500
+                    else "INTERNAL_SERVER_ERROR"
+                )
+            )
+        )
+        record_request_log(
+            endpoint=path,
+            status="FAILURE",
+            is_accurate=False,
+            error_type=err_type,
+            error_message=str(exc.detail),
+            latency_ms=elapsed_ms,
+        )
+    return await _fastapi_http_exception_handler(request, exc)
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """System health check and loaded models summary."""
+    """System health check and loaded models summary with server uptime and timestamp."""
     stats = get_cache_stats()
     models_summary = getattr(app.state, "models_config", {})
     _, searxng_enabled = get_searxng_config()
     openrouter_keys = load_openrouter_api_keys()
     active_pool = get_active_fallback_pool(models_summary)
+    active_model = get_active_model_selection()
+    now_ts = time.time()
+    uptime_sec = round(now_ts - APP_START_TIME, 2)
     return HealthResponse(
         status="ok",
         models=models_summary,
@@ -194,7 +337,56 @@ async def health_check() -> HealthResponse:
         searxng_circuit_open=is_searxng_circuit_open(),
         openrouter_keys_loaded=len(openrouter_keys),
         active_fallback_pool=active_pool,
+        active_model_selection=active_model,
+        timestamp=now_ts,
+        uptime_seconds=uptime_sec,
     )
+
+
+@app.get("/api/model-selection")
+async def get_backend_model_selection() -> Dict[str, Any]:
+    """Retrieve active model selection, user label, and structured model catalog."""
+    active = get_active_model_selection()
+    return {
+        "status": "ok",
+        "selected_model": active,
+        "selected_label": get_model_display_label(active),
+        "catalog": get_available_models_catalog(getattr(app.state, "models_config", None)),
+    }
+
+
+@app.post("/api/model-selection")
+async def set_backend_model_selection(request: Request) -> Dict[str, Any]:
+    """Update active model selection on the backend."""
+    try:
+        body = await request.json()
+        model_name = body.get("model") or body.get("selected_model") or "auto"
+    except Exception:
+        model_name = "auto"
+    return set_active_model_selection(model_name)
+
+
+@app.post("/shutdown")
+async def shutdown_backend(request: Request) -> dict:
+    """Gracefully terminate local backend process when authorized."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1", "testclient"):
+        raise HTTPException(status_code=403, detail="Shutdown restricted to localhost")
+
+    import os
+    import sys
+    import signal
+    import threading
+
+    # Only terminate process when running in production server, not inside test runners
+    if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
+        def _terminate():
+            time.sleep(0.3)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(target=_terminate, daemon=True).start()
+
+    return {"status": "ok", "message": "Backend server is shutting down"}
 
 
 @app.get("/stats", response_model=StatsResponse)
@@ -292,18 +484,40 @@ def _build_cached_response(req: SolveRequest, cached: Dict[str, Any], elapsed_ms
     )
 
 
-async def _solve_core(req: SolveRequest) -> Tuple[SolveResponse, Dict[str, Any]]:
+# Deduplication and Coalescing State
+_in_flight_locks: Dict[str, asyncio.Future] = {}
+_in_flight_mutex = asyncio.Lock()
+_recent_solved_coalesce: Dict[str, Tuple[float, SolveResponse, Dict[str, Any]]] = {}
+
+
+async def _solve_core(
+    req: SolveRequest,
+    endpoint: str = "/solve",
+    request: Optional[Request] = None,
+) -> Tuple[SolveResponse, Dict[str, Any]]:
     """
     Shared solve pipeline used by /solve and /debug/solve.
 
     Returns the public response plus a debug trace (models_called,
-    agreement_details). The trace is empty on cache hits because cached
-    rows intentionally do not store per-model diagnostics.
+    agreement_details). Deduplicates concurrent in-flight requests and
+    coalesces rapid repeated calls within 2.5s to eliminate redundant LLM calls.
     """
     t0 = time.perf_counter()
     _sanitize_solve_request(req)
 
-    # 1. Cache Lookup (unless bypassed)
+    # Compute deterministic coalescing / cache key
+    img_sig = getattr(req, "image_data", None) or getattr(req, "image_url", None)
+    c_key = compute_cache_key(
+        subject=req.subject,
+        q_type=req.q_type,
+        question=req.question,
+        options=req.options,
+        language=req.language,
+        starter_code=req.starter_code,
+        image_data=img_sig,
+    )
+
+    # 1. Order-Invariant Persistent Cache Lookup (unless bypassed)
     if not req.bypass_cache:
         cached = get_cached_solution(
             subject=req.subject,
@@ -312,132 +526,259 @@ async def _solve_core(req: SolveRequest) -> Tuple[SolveResponse, Dict[str, Any]]
             options=req.options,
             language=req.language,
             starter_code=req.starter_code,
+            image_data=getattr(req, "image_data", None),
         )
         if cached:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            return _build_cached_response(req, cached, elapsed_ms), {
+            response = _build_cached_response(req, cached, elapsed_ms)
+            trace = {
                 "models_called": list(cached.get("models_called", []) or []),
                 "agreement_details": {},
             }
+            _recent_solved_coalesce[c_key] = (time.time(), response, trace)
+            return response, trace
 
-    # 2. Live Solver Execution
-    client = getattr(app.state, "http_client", None)
-    if client is None or getattr(client, "is_closed", False):
-        client = httpx.AsyncClient()
-        app.state.http_client = client
-    config = getattr(app.state, "models_config", None)
+        # 2. Coalesce check for rapid repeated requests (< 2.5s) to avoid duplicate solves on rapid double-clicks/DOM churn
+        now_ts = time.time()
+        recent = _recent_solved_coalesce.get(c_key)
+        if recent is not None:
+            ts, cached_res, cached_trace = recent
+            if now_ts - ts <= 2.5:
+                if request is not None:
+                    request.state.telemetry_logged = True
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                cloned_res = cached_res.model_copy(update={"latency_ms": round(elapsed_ms, 2), "cache_hit": True})
+                return cloned_res, cached_trace
 
-    solver_res = await solve_question(
-        subject=req.subject,
-        q_type=req.q_type,
-        question=req.question,
-        options=req.options,
-        config=config,
-        client=client,
-        language=req.language,
-        starter_code=req.starter_code,
-        error_context=req.error_context,
-    )
-
-    tier = solver_res.confidence_tier
-    is_ok = (solver_res.status.upper() == "OK")
-
-    # Map Confidence Tiers to API contracts
-    if tier in ("HIGH_BOTH_AGREE", "USER_VERIFIED_OVERRIDE"):
-        confidence_label = "high"
-        confidence_score = 1.0
-        auto_eligible = is_ok
-    elif tier == "MEDIUM_SEARXNG_GROUNDED":
-        confidence_label = "medium"
-        confidence_score = 0.75
-        auto_eligible = is_ok
-    elif tier == "MEDIUM_TIEBREAKER_AGREE":
-        confidence_label = "medium"
-        confidence_score = 0.67
-        auto_eligible = is_ok
-    elif tier in ("LOW_FALLBACK_RESCUE", "LOW_FALLBACK"):
-        confidence_label = "low"
-        confidence_score = 0.5
-        auto_eligible = False
-    else:
-        confidence_label = "uncertain"
-        confidence_score = 0.0
-        auto_eligible = False
-
-    if is_ok:
-        if req.q_type in ("mcq", "order", "multi"):
-            answer_val = solver_res.canonical_key or ""
+    # 3. In-Flight Coalescing: join existing solver if another coroutine is already solving this question
+    is_leader = False
+    in_flight_future: Optional[asyncio.Future] = None
+    async with _in_flight_mutex:
+        if c_key in _in_flight_locks:
+            in_flight_future = _in_flight_locks[c_key]
         else:
-            answer_val = solver_res.selected_text or getattr(solver_res, "raw_answer", None) or solver_res.canonical_key or ""
-    else:
-        answer_val = ""
+            loop = asyncio.get_running_loop()
+            in_flight_future = loop.create_future()
+            _in_flight_locks[c_key] = in_flight_future
+            is_leader = True
 
-    # Zero-Poison Rule: Cache ONLY high and medium confidence solutions
-    if is_ok and tier in (
-        "HIGH_BOTH_AGREE",
-        "MEDIUM_TIEBREAKER_AGREE",
-        "MEDIUM_SEARXNG_GROUNDED",
-        "USER_VERIFIED_OVERRIDE",
-    ):
-        cache_solution(
+    if not is_leader:
+        # Await the in-flight leader coroutine's result
+        try:
+            leader_res, leader_trace = await in_flight_future
+            if request is not None:
+                request.state.telemetry_logged = True
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            cloned = leader_res.model_copy(update={"latency_ms": round(elapsed_ms, 2)})
+            return cloned, leader_trace
+        except Exception:
+            raise
+
+    # 4. As leader, execute live solver
+    response: Optional[SolveResponse] = None
+    trace: Dict[str, Any] = {}
+    solver_res = None
+    captured_exc: Optional[Exception] = None
+
+    try:
+        client = getattr(app.state, "http_client", None)
+        if client is None or getattr(client, "is_closed", False):
+            client = httpx.AsyncClient()
+            app.state.http_client = client
+        config = getattr(app.state, "models_config", None)
+
+        chosen_model = getattr(req, "model", None) or get_active_model_selection()
+        solver_res = await solve_question(
             subject=req.subject,
             q_type=req.q_type,
             question=req.question,
             options=req.options,
-            solver_res=solver_res,
+            config=config,
+            client=client,
             language=req.language,
             starter_code=req.starter_code,
+            error_context=req.error_context,
+            image_data=getattr(req, "image_data", None),
+            image_url=getattr(req, "image_url", None),
+            selected_model=chosen_model,
         )
 
-    response = SolveResponse(
-        status="ok" if is_ok else "uncertain",
-        q_type=req.q_type,
-        answer=answer_val,
-        selected_index=solver_res.selected_index,
-        selected_text=solver_res.selected_text,
-        selected_indices=getattr(solver_res, "selected_indices", None),
-        selected_texts=getattr(solver_res, "selected_texts", None),
-        canonical_keys=getattr(solver_res, "canonical_keys", None),
-        permutation_indices=solver_res.permutation_indices,
-        ordered_texts=solver_res.ordered_texts,
-        reason=solver_res.reason or "",
-        confidence_tier=tier,
-        confidence_label=confidence_label,
-        confidence_score=confidence_score,
-        auto_eligible=auto_eligible,
-        cache_hit=False,
-        latency_ms=round(solver_res.latency_ms, 2),
-        searxng_used=solver_res.searxng_used,
-        search_sources=solver_res.search_sources,
-        language=req.language if req.q_type == "code" else None,
-        error=solver_res.error,
-    )
-    return response, {
-        "models_called": list(getattr(solver_res, "models_called", []) or []),
-        "agreement_details": dict(getattr(solver_res, "agreement_details", {}) or {}),
-    }
+        tier = solver_res.confidence_tier
+        is_ok = (solver_res.status.upper() == "OK")
+
+        # Map Confidence Tiers to API contracts
+        if tier.startswith("HIGH_") or tier == "USER_VERIFIED_OVERRIDE":
+            confidence_label = "high"
+            confidence_score = 1.0
+            auto_eligible = is_ok
+        elif tier == "MEDIUM_SEARXNG_GROUNDED":
+            confidence_label = "medium"
+            confidence_score = 0.75
+            auto_eligible = is_ok
+        elif tier in ("MEDIUM_TIEBREAKER_AGREE", "SINGLE_PRIMARY_PASSED"):
+            confidence_label = "medium"
+            confidence_score = 0.67
+            auto_eligible = is_ok
+        elif tier in ("LOW_FALLBACK_RESCUE", "LOW_FALLBACK"):
+            confidence_label = "low"
+            confidence_score = 0.5
+            auto_eligible = False
+        else:
+            confidence_label = "uncertain"
+            confidence_score = 0.0
+            auto_eligible = False
+
+        if is_ok:
+            if req.q_type in ("mcq", "order", "multi"):
+                answer_val = solver_res.canonical_key or ""
+            else:
+                answer_val = solver_res.selected_text or getattr(solver_res, "raw_answer", None) or solver_res.canonical_key or ""
+        else:
+            answer_val = ""
+
+        # Zero-Poison Rule: Cache ONLY high and medium confidence solutions
+        if is_ok and (
+            tier.startswith("HIGH_")
+            or tier in (
+                "MEDIUM_TIEBREAKER_AGREE",
+                "MEDIUM_SEARXNG_GROUNDED",
+                "USER_VERIFIED_OVERRIDE",
+                "SINGLE_PRIMARY_PASSED",
+            )
+        ):
+            cache_solution(
+                subject=req.subject,
+                q_type=req.q_type,
+                question=req.question,
+                options=req.options,
+                solver_res=solver_res,
+                language=req.language,
+                starter_code=req.starter_code,
+                image_data=getattr(req, "image_data", None),
+            )
+
+        response = SolveResponse(
+            status="ok" if is_ok else "uncertain",
+            q_type=req.q_type,
+            answer=answer_val,
+            selected_index=solver_res.selected_index,
+            selected_text=solver_res.selected_text,
+            selected_indices=getattr(solver_res, "selected_indices", None),
+            selected_texts=getattr(solver_res, "selected_texts", None),
+            canonical_keys=getattr(solver_res, "canonical_keys", None),
+            permutation_indices=solver_res.permutation_indices,
+            ordered_texts=solver_res.ordered_texts,
+            reason=solver_res.reason or "",
+            confidence_tier=tier,
+            confidence_label=confidence_label,
+            confidence_score=confidence_score,
+            auto_eligible=auto_eligible,
+            cache_hit=False,
+            latency_ms=round(solver_res.latency_ms, 2),
+            searxng_used=solver_res.searxng_used,
+            search_sources=solver_res.search_sources,
+            language=req.language if req.q_type == "code" else None,
+            error=solver_res.error,
+        )
+        trace = {
+            "models_called": list(getattr(solver_res, "models_called", []) or []),
+            "agreement_details": dict(getattr(solver_res, "agreement_details", {}) or {}),
+        }
+
+        # Update coalesce cache & resolve follower future
+        _recent_solved_coalesce[c_key] = (time.time(), response, trace)
+        if in_flight_future and not in_flight_future.done():
+            in_flight_future.set_result((response, trace))
+
+        return response, trace
+    except Exception as exc:
+        captured_exc = exc
+        if in_flight_future and not in_flight_future.done():
+            in_flight_future.set_exception(exc)
+        raise
+    finally:
+        async with _in_flight_mutex:
+            _in_flight_locks.pop(c_key, None)
+            # Prune coalesce records older than 30s
+            now_prune = time.time()
+            stale_keys = [k for k, (t_record, _, _) in _recent_solved_coalesce.items() if now_prune - t_record > 30.0]
+            for k in stale_keys:
+                _recent_solved_coalesce.pop(k, None)
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        model_name = ""
+        cache_hit = False
+        raw_preview = None
+
+        if response is not None:
+            cache_hit = getattr(response, "cache_hit", False)
+            if cache_hit:
+                model_name = "cache"
+            raw_preview = response.model_dump_json()[:2000]
+
+        if not model_name:
+            if trace and trace.get("models_called"):
+                model_name = ",".join(trace.get("models_called", []))
+            elif solver_res is not None and getattr(solver_res, "models_called", None):
+                model_name = ",".join(getattr(solver_res, "models_called", []))
+
+        is_accurate, error_type, status_val = validate_accuracy_and_classify_error(
+            q_type=req.q_type,
+            options=req.options,
+            response=response,
+            exception=captured_exc,
+            error_msg=str(captured_exc) if captured_exc else (getattr(response, "error", None) if response else None),
+        )
+
+        if request is not None and getattr(request.state, "telemetry_logged", False):
+            pass
+        else:
+            if request is not None:
+                request.state.telemetry_logged = True
+            record_request_log(
+                endpoint=endpoint,
+                subject=req.subject,
+                q_type=req.q_type,
+                question_text=req.question,
+                options=req.options,
+                selected_answer=getattr(response, "answer", None) if response else None,
+                selected_index=getattr(response, "selected_index", None) if response else None,
+                canonical_key=(
+                    getattr(response, "canonical_keys", None)[0]
+                    if (response and getattr(response, "canonical_keys", None))
+                    else (getattr(response, "answer", None) if response else None)
+                ),
+                status=status_val,
+                is_accurate=is_accurate,
+                error_type=error_type,
+                error_message=str(captured_exc) if captured_exc else (getattr(response, "error", None) if response else None),
+                latency_ms=elapsed_ms,
+                model_name=model_name,
+                cache_hit=cache_hit,
+                raw_response_preview=raw_preview,
+            )
 
 
 @app.post("/solve", response_model=SolveResponse)
-async def solve_endpoint(req: SolveRequest) -> SolveResponse:
+async def solve_endpoint(req: SolveRequest, request: Request) -> SolveResponse:
     """
     Solve a quiz question across MCQ, unlabelled order blocks, free text, and code.
     Checks the order-invariant SQLite cache first (unless bypass_cache=True).
     On cache miss, runs parallel primary models + fallback solver, enforcing
     Zero-Poison caching rules and derived cross-model confidence.
     """
-    response, _ = await _solve_core(req)
+    response, _ = await _solve_core(req, endpoint="/solve", request=request)
     return response
 
 
 @app.post("/debug/solve", response_model=DebugSolveResponse)
-async def debug_solve_endpoint(req: SolveRequest) -> DebugSolveResponse:
+async def debug_solve_endpoint(req: SolveRequest, request: Request) -> DebugSolveResponse:
     """
     Development-only variant of /solve that also returns the full decision
     trace: models_called and agreement_details (per-model latencies and
     consensus path). Cache hits return an empty trace.
     """
-    response, trace = await _solve_core(req)
+    response, trace = await _solve_core(req, endpoint="/debug/solve", request=request)
     return DebugSolveResponse(**response.model_dump(), **trace)
 
 

@@ -156,7 +156,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentHost = "localhost";
   let activeTabUrl = "";
   let activeTabId = null;
-  let hostAllowlist = ["localhost", "127.0.0.1", "::1"];
+  let hostAllowlist = ["localhost", "127.0.0.1", "::1", "learning.ccbp.in"];
   let extractedState = {
     subject: "General",
     q_type: "auto",
@@ -279,7 +279,7 @@ document.addEventListener("DOMContentLoaded", () => {
       checkBackendHealth();
       if (statusText && statusText.textContent.toLowerCase().includes("offline")) {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "START_BACKEND" }, () => {});
+          chrome.runtime.sendMessage({ action: "START_BACKEND" }).catch(() => {});
         }
       }
     });
@@ -295,6 +295,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return true;
     }
     if (activeTabUrl && activeTabUrl.startsWith("file:///")) {
+      return true;
+    }
+    if (clean === "learning.ccbp.in" || clean.endsWith(".ccbp.in")) {
       return true;
     }
     return hostAllowlist.includes(clean);
@@ -334,7 +337,7 @@ document.addEventListener("DOMContentLoaded", () => {
       showAlert(`Host "${clean}" added to Own-App Allowlist.`, false);
     }
 
-    chrome.storage.local.set({ auto_mode_allowlist: hostAllowlist }, () => {
+    chrome.storage.local.set({ auto_mode_allowlist: hostAllowlist, allowedHosts: hostAllowlist }, () => {
       updateAllowlistUI();
       setTimeout(hideAlert, 2500);
     });
@@ -426,8 +429,12 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       // Auto mode settings
-      if (Array.isArray(res.auto_mode_allowlist)) {
-        hostAllowlist = res.auto_mode_allowlist;
+      const loadedAllowlist = Array.isArray(res.auto_mode_allowlist) ? res.auto_mode_allowlist : (Array.isArray(res.allowedHosts) ? res.allowedHosts : null);
+      if (loadedAllowlist) {
+        hostAllowlist = loadedAllowlist;
+      }
+      if (!hostAllowlist.includes("learning.ccbp.in")) {
+        hostAllowlist.push("learning.ccbp.in");
       }
       if (typeof res.auto_max_steps === "number" && inputMaxSteps) {
         inputMaxSteps.value = res.auto_max_steps;
@@ -490,6 +497,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function initActiveTab() {
     chrome.runtime.sendMessage({ action: "GET_ACTIVE_TAB" }, (response) => {
+      if (chrome.runtime.lastError) {
+        currentHost = "localhost";
+        if (activeHostBadge) activeHostBadge.textContent = currentHost;
+        loadSettingsForHost(currentHost);
+        return;
+      }
       if (response && response.success && response.tab && response.tab.url) {
         activeTabUrl = response.tab.url;
         activeTabId = response.tab.id;
@@ -550,7 +563,7 @@ document.addEventListener("DOMContentLoaded", () => {
         chrome.runtime.sendMessage({
           action: "APPLY_HIGHLIGHT",
           payload: { remove: true }
-        });
+        }).catch(() => {});
       }
     });
   }
@@ -809,7 +822,7 @@ document.addEventListener("DOMContentLoaded", () => {
             selected_index: solution.selected_index,
             customSelectors: getCustomSelectors()
           }
-        });
+        }).catch(() => {});
       }
     }
 
@@ -889,6 +902,10 @@ document.addEventListener("DOMContentLoaded", () => {
               starter_code: (extracted && extracted.starter_code)
             }
           }, (res) => {
+            if (chrome.runtime.lastError) {
+              showAlert(`Code injection failed: ${chrome.runtime.lastError.message}`);
+              return;
+            }
             if (res && res.success) {
               showAlert("Code successfully injected into editor!", false);
               setTimeout(hideAlert, 2000);
@@ -971,6 +988,10 @@ document.addEventListener("DOMContentLoaded", () => {
             customSelectors: {},
             forcedQType: forcedQType
           }, (retryResponse) => {
+            if (chrome.runtime.lastError) {
+              handleFailure(response);
+              return;
+            }
             if (retryResponse && retryResponse.success) {
               handleSuccess(retryResponse);
               return;
@@ -987,12 +1008,26 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  function isValidExtractedQuestion(q) {
+    if (!q) return false;
+    const stem = (q.stem || q.question_text || q.question || "").trim();
+    if (stem.length < 2) return false;
+    const type = (q.q_type || "mcq").toLowerCase();
+    if (["mcq", "multi", "order"].includes(type)) {
+      const validOpts = Array.isArray(q.options)
+        ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+        : [];
+      if (validOpts.length < 2) return false;
+    }
+    return true;
+  }
+
   // ==========================================================================
   // Core Action: Solve Quiz
   // ==========================================================================
   function performSolve(extracted, callback) {
-    if (!extracted || !extracted.question) {
-      showAlert("No question text available to solve. Please extract or enter a question first.");
+    if (!extracted || !isValidExtractedQuestion(extracted)) {
+      showAlert("No valid question detected to solve (empty stem or insufficient options). Please extract or enter a valid question first.");
       if (callback) callback(null);
       return;
     }
@@ -1009,6 +1044,9 @@ document.addEventListener("DOMContentLoaded", () => {
       options: extracted.options || [],
       language: (extracted && extracted.language) ? extracted.language : null,
       starter_code: (extracted && extracted.starter_code) ? extracted.starter_code : null,
+      image_data: (extracted && extracted.image_data) ? extracted.image_data : null,
+      image_url: (extracted && extracted.image_url) ? extracted.image_url : null,
+      meta: (extracted && extracted.meta) ? extracted.meta : null,
       bypass_cache: toggleBypassCache ? toggleBypassCache.checked : false
     };
 
@@ -1026,7 +1064,9 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       if (!response || !response.success) {
-        showAlert(response && response.error ? response.error : "Failed to solve question. Check if backend is running.");
+        const errMsg = response && response.error ? response.error : "Failed to solve question. Check if backend is running.";
+        const isRateLimited = (response && response.status === 429) || errMsg.includes("429") || errMsg.toLowerCase().includes("rate limit");
+        showAlert(isRateLimited ? "Rate limit cooldown (10s)..." : errMsg);
         if (callback) callback(null);
         return;
       }
@@ -1103,6 +1143,11 @@ document.addEventListener("DOMContentLoaded", () => {
           starter_code: solution.starter_code || (extractedState && extractedState.starter_code)
         }
       }, (res) => {
+        if (chrome.runtime.lastError) {
+          showAlert(`Code injection failed: ${chrome.runtime.lastError.message}`);
+          if (callback) callback(false, null);
+          return;
+        }
         if (res && res.success) {
           showAlert("Code successfully injected into editor!", false);
           setTimeout(hideAlert, 2000);
@@ -1227,7 +1272,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const onExtracted = (extracted) => {
       if (!isAutoRunning || killSwitchTriggered) return;
 
-      if (!extracted || !extracted.question) {
+      if (!extracted || !isValidExtractedQuestion(extracted)) {
         if (sameQuestionCount < 2) {
           sameQuestionCount++;
           setTimeout(() => performExtraction(onExtracted), 400);
@@ -1357,6 +1402,9 @@ document.addEventListener("DOMContentLoaded", () => {
           action: "EXECUTE_QUIZ_ACTION",
           payload: actionPayload
         }, (actionRes) => {
+          if (chrome.runtime.lastError) {
+            actionRes = { success: false, error: chrome.runtime.lastError.message };
+          }
           if (!isAutoRunning || killSwitchTriggered) return;
 
           if (!actionRes || !actionRes.success || actionRes.ok === false || actionRes.selected === false) {
@@ -1384,10 +1432,11 @@ document.addEventListener("DOMContentLoaded", () => {
             chrome.runtime.sendMessage({
               action: "APPLY_DOM_HIGHLIGHT",
               payload: highlightPayload
-            });
+            }).catch(() => {});
 
             // Advance to next question so auto mode keeps running!
             chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }, () => {
+              if (chrome.runtime.lastError) {}
               setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 700);
             });
             return;
@@ -1425,6 +1474,9 @@ document.addEventListener("DOMContentLoaded", () => {
               action: "CLICK_NEXT_BUTTON",
               customNextSelector: nextSelector
             }, (nextRes) => {
+              if (chrome.runtime.lastError) {
+                nextRes = { success: false, error: chrome.runtime.lastError.message };
+              }
               if (!isAutoRunning || killSwitchTriggered) return;
 
               if (!nextRes || !nextRes.success) {
@@ -1482,6 +1534,9 @@ document.addEventListener("DOMContentLoaded", () => {
         action: "CLICK_NEXT_BUTTON",
         customNextSelector: nextSelector
       }, (nextRes) => {
+        if (chrome.runtime.lastError) {
+          nextRes = { success: false, error: chrome.runtime.lastError.message };
+        }
         if (!isAutoRunning || killSwitchTriggered) return;
         if (!nextRes || !nextRes.success) {
           isAutoRunning = false;
@@ -1526,6 +1581,9 @@ document.addEventListener("DOMContentLoaded", () => {
         action: "EXECUTE_QUIZ_ACTION",
         payload: actionPayload
       }, (actionRes) => {
+        if (chrome.runtime.lastError) {
+          actionRes = { success: false, error: chrome.runtime.lastError.message };
+        }
         if (!actionRes || !actionRes.success) {
           showAlert(`Failed to apply answer: ${actionRes ? actionRes.error : "Unknown error"}`, true);
         } else {
@@ -1540,6 +1598,9 @@ document.addEventListener("DOMContentLoaded", () => {
     btnSwipeAdvance.addEventListener("click", () => {
       showAlert("Swiping / advancing to next question...", false);
       chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, (res) => {
+        if (chrome.runtime.lastError) {
+          res = { success: false, error: chrome.runtime.lastError.message };
+        }
         if (res && (res.success || res.ok)) {
           showAlert(`Advanced: ${res.button_text || res.method || "Next"}`, false);
         } else {
@@ -1569,6 +1630,9 @@ document.addEventListener("DOMContentLoaded", () => {
         chrome.runtime.sendMessage({
           action: "START_CODING_AUTOMATION"
         }, (res) => {
+          if (chrome.runtime.lastError) {
+            res = { success: false, error: chrome.runtime.lastError.message };
+          }
           if (btnExtractSolve) btnExtractSolve.disabled = false;
           if (solutionLoadingState) solutionLoadingState.classList.add("hidden");
           if (res && res.success && res.solution) {
@@ -1796,7 +1860,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (e.altKey && (key === "n" || code === "KeyN")) {
       e.preventDefault();
-      chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" });
+      chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }).catch(() => {});
       return;
     }
 
@@ -1805,7 +1869,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (btnSwipeAdvance) {
         btnSwipeAdvance.click();
       } else {
-        chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" });
+        chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }).catch(() => {});
       }
       return;
     }
@@ -1862,10 +1926,10 @@ document.addEventListener("DOMContentLoaded", () => {
         } else if (cmd === "trigger_apply") {
           if (btnApplyOnce) btnApplyOnce.click();
         } else if (cmd === "trigger_next") {
-          chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" });
+          chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }).catch(() => {});
         } else if (cmd === "trigger_advance") {
           if (btnSwipeAdvance) btnSwipeAdvance.click();
-          else chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" });
+          else chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }).catch(() => {});
         } else if (cmd === "trigger_auto" || cmd === "trigger_auto_loop") {
           if (isAutoRunning) {
             triggerKillSwitch("Stopped via shortcut");
@@ -1888,9 +1952,29 @@ document.addEventListener("DOMContentLoaded", () => {
   let shiftDownSp = false;
   let shiftComboUsedSp = false;
   let shiftTimerSp = null;
+
+  function isEditableElementSidepanel(el) {
+    if (!el) return false;
+    const tag = (el.tagName || "").toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (el.isContentEditable) return true;
+    if (typeof el.getAttribute === "function" && el.getAttribute("contenteditable") === "true") return true;
+    return false;
+  }
+
   document.addEventListener("keydown", (e) => {
     if (!e) return;
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    if (isEditableElementSidepanel(e.target) || isEditableElementSidepanel(activeEl)) {
+      shiftDownSp = false;
+      shiftComboUsedSp = true;
+      return;
+    }
     if (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight") {
+      if (e.ctrlKey || e.altKey || e.metaKey) {
+        shiftComboUsedSp = true;
+        return;
+      }
       if (shiftDownSp) return;
       shiftDownSp = true;
       shiftComboUsedSp = false;
@@ -1901,9 +1985,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.addEventListener("keyup", (e) => {
     if (!e) return;
-    if (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight") {
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    if (isEditableElementSidepanel(e.target) || isEditableElementSidepanel(activeEl)) {
       shiftDownSp = false;
-      if (!shiftComboUsedSp) {
+      shiftComboUsedSp = true;
+      return;
+    }
+    if (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight") {
+      const wasDown = shiftDownSp;
+      const wasCombo = shiftComboUsedSp;
+      shiftDownSp = false;
+      shiftComboUsedSp = false;
+      if (wasDown && !wasCombo) {
         if (shiftTimerSp) {
           clearTimeout(shiftTimerSp);
           shiftTimerSp = null;

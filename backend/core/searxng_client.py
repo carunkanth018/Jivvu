@@ -82,6 +82,21 @@ def is_factual_question(subject: str, q_type: str, question: str, options: List[
         r"\bspace\s+complexity\b",
         r"\bo\s*\(\s*[nN0-9]",
         r"```[a-z]*",
+        r"\bbinary\s+tree\b",
+        r"\bskewed\s+(binary\s+)?tree\b",
+        r"\bdiameter\s+of\s+(the\s+)?(binary\s+)?tree\b",
+        r"\btop\s+view\b",
+        r"\bbottom\s+view\b",
+        r"\bleft\s+view\b",
+        r"\bright\s+view\b",
+        r"\binorder\b",
+        r"\bpreorder\b",
+        r"\bpostorder\b",
+        r"\blevel\s*order\b",
+        r"\bmaxpathsum\b",
+        r"\blca\b",
+        r"\blowest\s+common\s+ancestor\b",
+        r"\bheight\s+of\s+(the\s+)?tree\b",
     ]
     for pattern in code_patterns:
         if re.search(pattern, full_text):
@@ -141,26 +156,85 @@ def strip_html_tags(text: str) -> str:
     return clean
 
 
+async def fetch_duckduckgo_snippets(
+    client: httpx.AsyncClient,
+    query: str,
+    timeout_ms: int = 1500,
+) -> List[Dict[str, str]]:
+    """
+    Query DuckDuckGo HTML endpoint for top 3 clean, sanitized snippets.
+    Provides fast, free fallback when SearXNG container is offline.
+    """
+    if not query or not str(query).strip():
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    url = "https://html.duckduckgo.com/html/"
+    timeout_sec = max(0.5, timeout_ms / 1000.0)
+
+    try:
+        response = await client.post(url, data={"q": query}, headers=headers, timeout=timeout_sec)
+        if response.status_code != 200:
+            return []
+
+        titles = re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', response.text)
+        snippets = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', response.text)
+
+        results: List[Dict[str, str]] = []
+        for i in range(min(len(titles), len(snippets), 3)):
+            link, raw_title = titles[i]
+            raw_snip = snippets[i]
+
+            clean_title = strip_html_tags(raw_title)
+            clean_snip = strip_html_tags(raw_snip)
+
+            if clean_snip:
+                results.append({
+                    "title": clean_title[:80],
+                    "content": clean_snip[:250].strip(),
+                    "url": link,
+                })
+
+        return results
+    except Exception:
+        return []
+
+
 async def fetch_searxng_snippets(
     client: httpx.AsyncClient,
     query: str,
     timeout_ms: int = 700,
     base_url: Optional[str] = None,
+    allow_fallback: bool = True,
 ) -> List[Dict[str, str]]:
     """
     Query SearXNG JSON API for top 3 clean, truncated search snippets.
     Fails open instantly (< 5ms) if circuit breaker is open.
     Opens circuit for 60 seconds if connection fails.
+    Falls back to DuckDuckGo when SearXNG is unavailable and allow_fallback is True.
     """
     global _circuit_open_until
 
-    # Check circuit breaker
-    if is_searxng_circuit_open():
-        return []
-
-    url_to_use, enabled = get_searxng_config()
+    configured_url, enabled = get_searxng_config()
+    url_to_use = configured_url
     if base_url:
         url_to_use = base_url.rstrip("/")
+        # If directed to an explicit non-default port/host (e.g. test port 59999), disable DDG fallback
+        if url_to_use != configured_url:
+            allow_fallback = False
+
+    if os.environ.get("QUIZZY_OFFLINE_TEST_MODE") == "1":
+        allow_fallback = False
+
+    # Check circuit breaker
+    if is_searxng_circuit_open():
+        if allow_fallback and enabled:
+            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
+        return []
 
     if not enabled:
         return []
@@ -179,40 +253,45 @@ async def fetch_searxng_snippets(
             timeout=timeout_sec,
         )
 
-        if response.status_code != 200:
-            return []
+        if response.status_code == 200:
+            data = response.json()
+            raw_results = data.get("results", [])
+            snippets: List[Dict[str, str]] = []
 
-        data = response.json()
-        raw_results = data.get("results", [])
-        snippets: List[Dict[str, str]] = []
+            for item in raw_results:
+                content = item.get("content") or item.get("snippet") or ""
+                title = item.get("title") or ""
+                link = item.get("url") or ""
 
-        for item in raw_results:
-            content = item.get("content") or item.get("snippet") or ""
-            title = item.get("title") or ""
-            link = item.get("url") or ""
+                clean_title = strip_html_tags(title)
+                clean_content = strip_html_tags(content)
 
-            # Sanitize snippet
-            clean_title = strip_html_tags(title)
-            clean_content = strip_html_tags(content)
+                if clean_content:
+                    truncated_content = clean_content[:250].strip()
+                    snippets.append({
+                        "title": clean_title[:80],
+                        "content": truncated_content,
+                        "url": link,
+                    })
 
-            if clean_content:
-                # Truncate content to 250 characters
-                truncated_content = clean_content[:250].strip()
-                snippets.append({
-                    "title": clean_title[:80],
-                    "content": truncated_content,
-                    "url": link,
-                })
+                if len(snippets) >= 3:
+                    break
 
-            if len(snippets) >= 3:
-                break
+            if snippets:
+                return snippets
 
-        return snippets
+        # If SearXNG returned non-200 or no snippets, try fallback
+        if allow_fallback:
+            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
+        return []
 
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         # Trip circuit breaker for 60 seconds
         _circuit_open_until = time.time() + 60.0
+        if allow_fallback:
+            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []
     except (httpx.TimeoutException, httpx.HTTPError, Exception):
-        # Transient timeout or error, fail open
+        if allow_fallback:
+            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []

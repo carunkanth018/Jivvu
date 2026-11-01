@@ -19,7 +19,7 @@ if "%PYTHON_EXE%"=="" (
     exit /b 1
 )
 
-"%PYTHON_EXE%" "%~dp0native_host\launcher.py" --register %*
+"%PYTHON_EXE%" "%~dp0backend\native_host.py" --register %*
 
 echo.
 pause

@@ -12,6 +12,44 @@
 
 const BACKEND_BASE_URL = "http://127.0.0.1:8000";
 
+// In-flight solve deduplication and 10s 429 rate limit cooldown tracking
+const _bgInFlightSolves = new Map();
+const _bgRecent429Signatures = new Map();
+
+function decodePotentialUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return "";
+  let u = rawUrl.trim();
+  for (let i = 0; i < 3; i++) {
+    if (u.includes("%3A") || u.includes("%2F") || u.includes("%3a") || u.includes("%2f")) {
+      try {
+        const dec = decodeURIComponent(u);
+        if (dec === u) break;
+        u = dec;
+      } catch (_) {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+  return u;
+}
+
+// Authoritative client-side validation guard to prevent dispatching invalid payloads to backend
+function isValidExtractedQuestion(q) {
+  if (!q) return false;
+  const stem = (q.stem || q.question_text || q.question || "").trim();
+  if (stem.length < 2) return false;
+  const type = (q.q_type || "mcq").toLowerCase();
+  if (["mcq", "multi", "order"].includes(type)) {
+    const validOpts = Array.isArray(q.options)
+      ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+      : [];
+    if (validOpts.length < 2) return false;
+  }
+  return true;
+}
+
 // Helper to resolve target tab: sender tab -> message.tabId -> active tab query
 async function resolveTargetTab(message, sender) {
   if (message && message.tabId) {
@@ -79,18 +117,27 @@ async function injectAndToggleFloatingHud(tabId, shouldToggle = true, autoShow =
 // Pre-seed default allowed hosts in chrome.storage.local (including learning.ccbp.in)
 function initializeStorageDefaults() {
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(["allowedHosts"], (data) => {
-      const current = data.allowedHosts || [];
+    chrome.storage.local.get(["allowedHosts", "auto_mode_allowlist"], (data) => {
       const defaults = ["127.0.0.1", "localhost", "::1", "learning.ccbp.in"];
+      const current = data.allowedHosts || [];
+      const currentAuto = data.auto_mode_allowlist || [];
       let modified = false;
+      let modifiedAuto = false;
       for (const d of defaults) {
         if (!current.includes(d)) {
           current.push(d);
           modified = true;
         }
+        if (!currentAuto.includes(d)) {
+          currentAuto.push(d);
+          modifiedAuto = true;
+        }
       }
-      if (modified || !data.allowedHosts) {
-        chrome.storage.local.set({ allowedHosts: current });
+      const update = {};
+      if (modified || !data.allowedHosts) update.allowedHosts = current;
+      if (modifiedAuto || !data.auto_mode_allowlist) update.auto_mode_allowlist = currentAuto;
+      if (Object.keys(update).length > 0) {
+        chrome.storage.local.set(update);
       }
     });
   }
@@ -198,7 +245,7 @@ if (typeof chrome !== "undefined" && chrome.windows) {
         if (!windows || !Array.isArray(windows)) return;
         for (const win of windows) {
           if (win && win.type === "popup" && win.tabs && win.tabs.some(t => t.url && t.url.includes("sidepanel.html?mode=popup"))) {
-            chrome.windows.remove(win.id);
+            chrome.windows.remove(win.id).catch(() => {});
           }
         }
       });
@@ -239,13 +286,269 @@ function updateActionBadge(text, color, tabId) {
   } catch (_) {}
 }
 
-// Auto-Inject on Tab Load / Refresh for Allowed Hosts
+// ==========================================================================
+// Automated Backend Lifecycle Management for learning.ccbp.in
+// Automatically starts the QuizZy backend on 127.0.0.1:8000 when learning.ccbp.in
+// is opened, and stops the backend when all learning.ccbp.in tabs are closed.
+// Uses Dual-Channel OS Bridge (Channel A: Dashboard Daemon API on port 8765,
+// Channel B: Chrome Native Messaging Host com.quizzy.lifecycle / com.quizzy.launcher).
+// ==========================================================================
+
+const DASHBOARD_API_BASE = "http://127.0.0.1:8765";
+const CCBP_DOMAIN = "learning.ccbp.in";
+const BACKEND_SHUTDOWN_DEBOUNCE_MS = 3000;
+const HEARTBEAT_ALARM_NAME = "quizzy_heartbeat";
+const STOP_DEBOUNCE_ALARM_NAME = "quizzy_stop_debounce";
+
+let ccbpShutdownTimer = null;
+let isStartingBackendAuto = false;
+let isStoppingBackendAuto = false;
+
+function isCcbpUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === CCBP_DOMAIN || host.endsWith("." + CCBP_DOMAIN);
+  } catch (_) {
+    return false;
+  }
+}
+
+function countCcbpTabs(callback) {
+  if (typeof chrome === "undefined" || !chrome.tabs || typeof chrome.tabs.query !== "function") {
+    if (callback) callback(0);
+    return;
+  }
+  chrome.tabs.query({}, (tabs) => {
+    if (chrome.runtime.lastError || !Array.isArray(tabs)) {
+      if (callback) callback(0);
+      return;
+    }
+    const ccbpCount = tabs.filter(t => t && t.url && isCcbpUrl(t.url)).length;
+    if (callback) callback(ccbpCount);
+  });
+}
+
+// Native Messaging fallback helper trying primary host then legacy host
+function sendNativeMessageWithFallback(payload, callback) {
+  if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.sendNativeMessage !== "function") {
+    if (callback) callback({ success: false, error: "sendNativeMessage API not available" });
+    return;
+  }
+  const hosts = ["com.quizzy.lifecycle", "com.quizzy.launcher"];
+  let tried = 0;
+
+  function tryNext() {
+    if (tried >= hosts.length) {
+      if (callback) callback({ success: false, error: "All native hosts failed" });
+      return;
+    }
+    const currentHost = hosts[tried++];
+    try {
+      chrome.runtime.sendNativeMessage(currentHost, payload, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn(`[QuizZy Native] Host ${currentHost} returned error:`, chrome.runtime.lastError.message);
+          tryNext();
+          return;
+        }
+        if (callback) callback(response || { success: true });
+      });
+    } catch (err) {
+      console.warn(`[QuizZy Native] Host ${currentHost} exception:`, err);
+      tryNext();
+    }
+  }
+
+  tryNext();
+}
+
+// Strict HTTP-First Start: Daemon API (8765) -> Native Host fallback ONLY if daemon offline
+async function startBackendDualChannel(reason = "ccbp_auto") {
+  if (isStartingBackendAuto) return;
+  isStartingBackendAuto = true;
+  console.log(`[QuizZy Lifecycle] Starting backend (reason: ${reason})...`);
+
+  // 1. Try Channel A: Silent HTTP Daemon on 8765 FIRST
+  try {
+    const resp = await fetch(`${DASHBOARD_API_BASE}/api/lifecycle/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: `extension:${reason}` })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      console.log("[QuizZy Lifecycle] Backend started silently via Daemon API:", data);
+      isStartingBackendAuto = false;
+      return data;
+    }
+  } catch (err) {
+    console.log("[QuizZy Lifecycle] Daemon API unreachable for start, falling back to Native Host...", err);
+  }
+
+  // 2. Fallback to Channel B: Native Host ONLY if Daemon API is completely unreachable
+  return new Promise((resolve) => {
+    sendNativeMessageWithFallback({ action: "START_BACKEND", source: `extension:${reason}` }, (res) => {
+      isStartingBackendAuto = false;
+      console.log("[QuizZy Lifecycle] Backend started via Native Host fallback:", res);
+      resolve(res);
+    });
+  });
+}
+
+// Strict HTTP-First Stop: Daemon API (8765) -> Native Host fallback ONLY if daemon offline
+async function stopBackendDualChannel(reason = "ccbp_tabs_closed") {
+  if (isStoppingBackendAuto) return;
+  isStoppingBackendAuto = true;
+  console.log(`[QuizZy Lifecycle] Stopping backend (reason: ${reason})...`);
+
+  // Direct graceful /shutdown attempt on port 8000
+  fetch(`${BACKEND_BASE_URL}/shutdown`, { method: "POST" }).catch(() => {});
+
+  // 1. Try Channel A: Silent HTTP Daemon on 8765 FIRST
+  let stoppedViaHttp = false;
+  try {
+    const resp = await fetch(`${DASHBOARD_API_BASE}/api/lifecycle/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: `extension:${reason}` })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      console.log("[QuizZy Lifecycle] Backend stopped silently via Daemon API:", data);
+      stoppedViaHttp = true;
+    }
+  } catch (err) {
+    console.log("[QuizZy Lifecycle] Daemon API unreachable for stop, falling back to Native Host...", err);
+  }
+
+  // 2. Fallback to Channel B: Native Host ONLY if Daemon API failed
+  if (!stoppedViaHttp) {
+    sendNativeMessageWithFallback({ action: "STOP_BACKEND", source: `extension:${reason}` }, (res) => {
+      console.log("[QuizZy Lifecycle] Backend stopped via Native Host fallback:", res);
+    });
+  }
+
+  isStoppingBackendAuto = false;
+}
+
+// Heartbeat sender: sends active tab count to Channel A, with Channel B fallback
+function sendLifecycleHeartbeat(activeTabs) {
+  fetch(`${DASHBOARD_API_BASE}/api/lifecycle/heartbeat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active_tabs: activeTabs })
+  }).catch(() => {
+    sendNativeMessageWithFallback({ action: "HEARTBEAT", active_tabs: activeTabs });
+  });
+}
+
+function ensureBackendRunningForCcbp(reason) {
+  // Cancel pending stop timers & alarms immediately
+  if (ccbpShutdownTimer) {
+    clearTimeout(ccbpShutdownTimer);
+    ccbpShutdownTimer = null;
+  }
+  if (typeof chrome !== "undefined" && chrome.alarms) {
+    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+  }
+
+  // Ensure periodic heartbeat alarm is running (Chrome MV3 requires periodInMinutes >= 1)
+  if (typeof chrome !== "undefined" && chrome.alarms) {
+    chrome.alarms.get(HEARTBEAT_ALARM_NAME, (alarm) => {
+      if (!alarm) {
+        chrome.alarms.create(HEARTBEAT_ALARM_NAME, { periodInMinutes: 1 });
+      }
+    });
+  }
+
+  // Fast check: if port 8000 is healthy, just send heartbeat
+  fetch(`${BACKEND_BASE_URL}/health`, { cache: "no-store" })
+    .then((res) => {
+      if (res.ok) {
+        sendLifecycleHeartbeat(1);
+        return;
+      }
+      startBackendDualChannel(reason);
+    })
+    .catch(() => {
+      startBackendDualChannel(reason);
+    });
+}
+
+function ensureBackendStoppedForCcbp(immediate = false) {
+  if (ccbpShutdownTimer) {
+    clearTimeout(ccbpShutdownTimer);
+    ccbpShutdownTimer = null;
+  }
+  if (typeof chrome !== "undefined" && chrome.alarms) {
+    chrome.alarms.clear(HEARTBEAT_ALARM_NAME).catch(() => {});
+    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+  }
+
+  const performStop = () => {
+    countCcbpTabs((finalCount) => {
+      if (finalCount === 0) {
+        console.log("[QuizZy Lifecycle] 0 CCBP tabs remain after debounce. Stopping backend...");
+        stopBackendDualChannel("zero_ccbp_tabs");
+      } else {
+        console.log(`[QuizZy Lifecycle] Aborting stop; ${finalCount} CCBP tab(s) still active.`);
+        sendLifecycleHeartbeat(finalCount);
+      }
+    });
+  };
+
+  if (immediate) {
+    performStop();
+  } else {
+    // Schedule stop debounce via setTimeout and chrome.alarms
+    ccbpShutdownTimer = setTimeout(() => {
+      ccbpShutdownTimer = null;
+      performStop();
+    }, BACKEND_SHUTDOWN_DEBOUNCE_MS);
+
+    if (typeof chrome !== "undefined" && chrome.alarms) {
+      chrome.alarms.create(STOP_DEBOUNCE_ALARM_NAME, {
+        when: Date.now() + BACKEND_SHUTDOWN_DEBOUNCE_MS
+      });
+    }
+  }
+}
+
+function syncCcbpBackendLifecycle(triggerReason, immediateStop = false) {
+  countCcbpTabs((count) => {
+    console.log(`[QuizZy Lifecycle] Event '${triggerReason}': ${count} active learning.ccbp.in tab(s).`);
+    if (count > 0) {
+      ensureBackendRunningForCcbp(triggerReason);
+    } else {
+      ensureBackendStoppedForCcbp(immediateStop);
+    }
+  });
+}
+
+// 1. Tab Updated Listener: URL changes, loading, completion
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    // Check if URL or navigation state changed
+    if (changeInfo.url || (tab && tab.url && isCcbpUrl(tab.url))) {
+      syncCcbpBackendLifecycle("tabs.onUpdated:url");
+    }
+
     if (changeInfo.status === "complete" && tab && tab.url) {
+      syncCcbpBackendLifecycle("tabs.onUpdated:complete");
+
       if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("chrome-extension://")) {
         return;
       }
+
+      if (isCcbpUrl(tab.url)) {
+        chrome.scripting.executeScript({
+          target: { tabId },
+          world: "ISOLATED",
+          files: ["ccbp_lifecycle_bridge.js"]
+        }).catch(() => {});
+      }
+
       try {
         const urlObj = new URL(tab.url);
         const hostname = urlObj.hostname.toLowerCase();
@@ -265,10 +568,52 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
   });
 }
 
-// SPA Route Change Hook: Inject & Wire shortcuts after SPA navigation without manual popup click
+// 2. Tab Created Listener
+if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onCreated) {
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (tab && tab.url && isCcbpUrl(tab.url)) {
+      syncCcbpBackendLifecycle("tabs.onCreated");
+    }
+  });
+}
+
+// 3. Tab Removed (Closed) Listener
+if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    syncCcbpBackendLifecycle("tabs.onRemoved");
+  });
+}
+
+// 4. Tab Replaced (Prerendered/Navigated) Listener
+if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onReplaced) {
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    syncCcbpBackendLifecycle("tabs.onReplaced");
+  });
+}
+
+// 5. Window Removed (Closed) Listener
+if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved) {
+  chrome.windows.onRemoved.addListener((closedWinId) => {
+    if (closedWinId === activePopupWindowId) {
+      activePopupWindowId = null;
+    }
+    // When a window closes, immediately check if any CCBP tabs remain
+    syncCcbpBackendLifecycle("windows.onRemoved", true);
+  });
+}
+
+// 6. SPA Route Change Hook: Inject & Wire shortcuts after SPA navigation
 if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
   chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details && details.tabId && details.url) {
+      if (isCcbpUrl(details.url)) {
+        syncCcbpBackendLifecycle("webNavigation.onHistoryStateUpdated");
+        chrome.scripting.executeScript({
+          target: { tabId: details.tabId },
+          world: "ISOLATED",
+          files: ["ccbp_lifecycle_bridge.js"]
+        }).catch(() => {});
+      }
       try {
         const urlObj = new URL(details.url);
         const hostname = urlObj.hostname.toLowerCase();
@@ -288,6 +633,53 @@ if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigatio
   });
 }
 
+// 7. Web Navigation Committed Listener
+if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigation.onCommitted) {
+  chrome.webNavigation.onCommitted.addListener((details) => {
+    if (details && details.url && isCcbpUrl(details.url)) {
+      syncCcbpBackendLifecycle("webNavigation.onCommitted");
+    }
+  });
+}
+
+// 8. Browser Startup & Extension Reload Hooks
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    syncCcbpBackendLifecycle("runtime.onStartup");
+  });
+}
+
+// 9. Extension Install & Update Hook
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {
+  chrome.runtime.onInstalled.addListener(() => {
+    syncCcbpBackendLifecycle("runtime.onInstalled");
+  });
+}
+
+// 10. Alarm-based durable Heartbeat and Stop-Debounce Listener (MV3 persistence)
+if (typeof chrome !== "undefined" && chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === HEARTBEAT_ALARM_NAME) {
+      countCcbpTabs((count) => {
+        if (count > 0) {
+          sendLifecycleHeartbeat(count);
+        } else {
+          ensureBackendStoppedForCcbp(false);
+        }
+      });
+    } else if (alarm.name === STOP_DEBOUNCE_ALARM_NAME) {
+      countCcbpTabs((count) => {
+        if (count === 0) {
+          stopBackendDualChannel("stop_debounce_alarm");
+        }
+      });
+    }
+  });
+}
+
+// Initial lifecycle synchronization on service worker load
+syncCcbpBackendLifecycle("worker_init");
+
 // Browser-Level Keyboard Shortcut Command Router (Alt+S, Alt+A, Alt+N, Alt+M)
 async function handleUnifiedCommand(command, targetTab) {
   if (!targetTab || !targetTab.id) return { success: false, error: "No target tab" };
@@ -302,7 +694,7 @@ async function handleUnifiedCommand(command, targetTab) {
   // 0. If side panel is open, all shortcuts route to the side panel!
   if (isSidePanelOpen) {
     try {
-      chrome.runtime.sendMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command });
+      chrome.runtime.sendMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command }).catch(() => {});
       return { success: true, forwarded_to_sidepanel: true };
     } catch (_) {}
   }
@@ -331,7 +723,7 @@ async function handleUnifiedCommand(command, targetTab) {
       return handleTriggerSolve({ tabId }, targetTab);
     } else if (command === "trigger_apply") {
       return handleTriggerApply({ tabId }, targetTab);
-    } else if (command === "trigger_auto_loop") {
+    } else if (command === "trigger_auto_loop" || command === "trigger_auto") {
       return handleTriggerAutoLoop({ tabId }, targetTab);
     } else if (command === "open_popup_hud") {
       return handleOpenPopupHud({ force: true }, targetTab);
@@ -349,6 +741,10 @@ async function handleUnifiedCommand(command, targetTab) {
   // Forward the shortcut action to the newly injected HUD
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, { action: "SHORTCUT_ACTION", command }, (res) => {
+      if (chrome.runtime.lastError) {
+        resolve({ success: false, error: chrome.runtime.lastError.message });
+        return;
+      }
       resolve(res || { success: true });
     });
   });
@@ -522,11 +918,15 @@ async function handleTriggerSolve(message, targetTab) {
                 payload: Object.assign({
                   subject: "Coding Practice",
                   q_type: "code",
-                  question: probText,
+                  question: probText || "Coding Practice Problem",
                   language: lang,
                   starter_code: starter
                 }, retryPayload)
               }, (response) => {
+                if (chrome.runtime.lastError) {
+                  resolve(null);
+                  return;
+                }
                 resolve(response && response.data ? response.data : null);
               });
             });
@@ -705,11 +1105,15 @@ async function handleTriggerAutoLoop(message, targetTab) {
                 payload: Object.assign({
                   subject: "Coding Practice",
                   q_type: "code",
-                  question: probText,
+                  question: probText || "Coding Practice Problem",
                   language: lang,
                   starter_code: starter
                 }, retryPayload)
               }, (response) => {
+                if (chrome.runtime.lastError) {
+                  resolve(null);
+                  return;
+                }
                 resolve(response && response.data ? response.data : null);
               });
             });
@@ -740,26 +1144,20 @@ async function handleTriggerAutoLoop(message, targetTab) {
 
 // Native Messaging Helper for Backend Launching
 function startBackendNative(callback) {
-  const hostName = "com.quizzy.launcher";
-  if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.sendNativeMessage !== "function") {
-    if (callback) callback({ success: false, error: "sendNativeMessage API not available" });
-    return;
-  }
-
-  try {
-    chrome.runtime.sendNativeMessage(hostName, { action: "START_BACKEND" }, (response) => {
-      if (chrome.runtime.lastError) {
-        const errMsg = chrome.runtime.lastError.message || "Native host error";
-        console.warn("[QuizZy] Native backend launcher message error:", errMsg);
-        if (callback) callback({ success: false, error: errMsg });
-        return;
-      }
-      if (callback) callback(response || { success: true, status: "started" });
-    });
-  } catch (err) {
-    console.warn("[QuizZy] Native backend launcher exception:", err);
+  startBackendDualChannel("manual_call").then((res) => {
+    if (callback) callback(res || { success: true, status: "started" });
+  }).catch((err) => {
     if (callback) callback({ success: false, error: err.message });
-  }
+  });
+}
+
+// Native Messaging Helper for Backend Termination
+function stopBackendNative(callback) {
+  stopBackendDualChannel("manual_call").then((res) => {
+    if (callback) callback(res || { success: true, status: "stopped" });
+  }).catch((err) => {
+    if (callback) callback({ success: false, error: err.message });
+  });
 }
 
 // ==========================================================================
@@ -771,6 +1169,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   const action = message.action || message.type;
+
+  // Instant CCBP Page Active / Heartbeat / Unload signals from content script
+  if (action === "CCBP_PAGE_ACTIVE" || action === "CCBP_PAGE_HEARTBEAT") {
+    if (ccbpShutdownTimer) {
+      clearTimeout(ccbpShutdownTimer);
+      ccbpShutdownTimer = null;
+    }
+    if (typeof chrome !== "undefined" && chrome.alarms) {
+      chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+    }
+    sendLifecycleHeartbeat(1);
+    ensureBackendRunningForCcbp(action === "CCBP_PAGE_HEARTBEAT" ? "content_script_heartbeat" : "message:CCBP_PAGE_ACTIVE");
+    sendResponse({ success: true, active: true });
+    return false;
+  }
+  if (action === "CCBP_PAGE_HIDE" || action === "CCBP_PAGE_UNLOAD") {
+    ensureBackendStoppedForCcbp(false); // starts 3-second debounce check
+    sendResponse({ success: true, hidden: true, unloading: true });
+    return false;
+  }
 
   // 0. Sidepanel state queries and mutual exclusivity commands
   if (action === "STOP_AUTO" || action === "KILL_SWITCH_TRIGGERED") {
@@ -848,32 +1266,186 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // asynchronous response
   }
 
+  // 1c. Stop local backend server via Native Messaging Host
+  if (action === "STOP_BACKEND") {
+    stopBackendNative((res) => {
+      sendResponse(res);
+    });
+    return true; // asynchronous response
+  }
+
   // 2. Proxy solve request to local backend
   if (action === "SOLVE_REQUEST") {
-    fetch(`${BACKEND_BASE_URL}/solve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(message.payload)
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const errorData = await res.json().catch(() => ({}));
-          sendResponse({
-            success: false,
-            status: res.status,
-            error: errorData.detail || `Server error (${res.status})`
-          });
-          return;
-        }
-        const data = await res.json();
-        sendResponse({ success: true, data });
-      })
-      .catch((err) => {
-        sendResponse({
-          success: false,
-          error: `Cannot reach QuizZy backend at ${BACKEND_BASE_URL}. Ensure it is running. (${err.message})`
-        });
+    // Authoritative pre-flight payload validation guard
+    if (!isValidExtractedQuestion(message.payload)) {
+      sendResponse({
+        success: false,
+        error: "Invalid question: stem is empty or insufficient options"
       });
+      return false;
+    }
+
+    const payload = Object.assign({}, message.payload);
+
+    // SVG Guard: Never send SVG XML to vision backend
+    if (payload.image_data && typeof payload.image_data === "string" && payload.image_data.startsWith("data:image/svg")) {
+      delete payload.image_data;
+    }
+
+    if (payload.image_url) {
+      payload.image_url = decodePotentialUrl(payload.image_url);
+    }
+    if (!payload.image_url && payload.question) {
+      const imgMatch = payload.question.match(/\[Image:\s*(https?:\/\/[^\s\]]+|https?%3A[^\s\]]+)\]/i);
+      if (imgMatch && imgMatch[1]) {
+        payload.image_url = decodePotentialUrl(imgMatch[1]);
+      }
+    }
+
+    const qStem = (payload.question || payload.stem || "").trim();
+    const qOpts = Array.isArray(payload.options) ? payload.options.join("|") : "";
+    const qSig = `${payload.subject || "General"}::${qStem}::${qOpts}`;
+
+    // 10s Rate Limit Cooldown Guard
+    const last429 = _bgRecent429Signatures.get(qSig);
+    if (last429 && (Date.now() - last429 < 10000)) {
+      sendResponse({
+        success: false,
+        status: 429,
+        error: "Rate limit cooldown active (waiting 10s before retry)"
+      });
+      return false;
+    }
+
+    // Coalesce concurrent duplicate solve requests for the exact same question
+    if (_bgInFlightSolves.has(qSig)) {
+      _bgInFlightSolves.get(qSig).push(sendResponse);
+      return true;
+    }
+
+    const callbacks = [sendResponse];
+    _bgInFlightSolves.set(qSig, callbacks);
+
+    const dispatchAll = (resObj) => {
+      _bgInFlightSolves.delete(qSig);
+      if (resObj && (resObj.status === 429 || (resObj.error && String(resObj.error).includes("429")))) {
+        _bgRecent429Signatures.set(qSig, Date.now());
+      }
+      for (const cb of callbacks) {
+        try { cb(resObj); } catch (_) {}
+      }
+    };
+
+    const executeSolveFetch = () => {
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 22000) : null;
+
+      fetch(`${BACKEND_BASE_URL}/solve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller ? controller.signal : undefined
+      })
+        .then(async (res) => {
+          if (timeoutId) clearTimeout(timeoutId);
+          if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            dispatchAll({
+              success: false,
+              status: res.status,
+              error: errorData.detail || `Server error (${res.status})`
+            });
+            return;
+          }
+          const data = await res.json();
+          dispatchAll({ success: true, data });
+        })
+        .catch((err) => {
+          if (timeoutId) clearTimeout(timeoutId);
+          dispatchAll({
+            success: false,
+            error: `Cannot reach QuizZy backend at ${BACKEND_BASE_URL}. Ensure it is running. (${err.message})`
+          });
+        });
+    };
+
+    // Helper: fetch cross-origin image in background context
+    const tryFetchImageUrl = async () => {
+      if (payload.image_url) {
+        payload.image_url = decodePotentialUrl(payload.image_url);
+      }
+      if (!payload.image_data && payload.image_url && typeof fetch === "function") {
+        try {
+          const imgResp = await fetch(payload.image_url);
+          if (imgResp.ok) {
+            const blob = await imgResp.blob();
+            const b64 = await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result);
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(blob);
+            });
+            if (b64 && (b64.startsWith("data:image/png") || b64.startsWith("data:image/jpeg") || b64.startsWith("data:image/webp"))) {
+              payload.image_data = b64;
+              return true;
+            }
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    tryFetchImageUrl().then((fetched) => {
+      if (fetched) {
+        executeSolveFetch();
+        return;
+      }
+
+      // Universal captureVisibleTab Fallback for visual diagrams
+      const hasVisual = payload.meta && (payload.meta.has_visual_diagram || payload.meta.visual_bounding_box);
+      const isStemVisual = payload.question && /\b(binary tree|tree|graph|diagram|figure|image|chart|circuit|given below|shown below)\b/i.test(payload.question);
+
+      if (!payload.image_data && (hasVisual || isStemVisual) && chrome.tabs && typeof chrome.tabs.captureVisibleTab === "function") {
+        try {
+          chrome.tabs.captureVisibleTab(null, { format: "png" }, async (dataUrl) => {
+            if (!chrome.runtime.lastError && dataUrl) {
+              const bbox = payload.meta ? payload.meta.visual_bounding_box : null;
+              if (bbox && bbox.width > 20 && bbox.height > 20 && typeof OffscreenCanvas !== "undefined") {
+                try {
+                  const resp = await fetch(dataUrl);
+                  const blob = await resp.blob();
+                  const bitmap = await createImageBitmap(blob);
+                  const w = Math.min(Math.round(bbox.width), bitmap.width);
+                  const h = Math.min(Math.round(bbox.height), bitmap.height);
+                  const x = Math.max(0, Math.min(Math.round(bbox.left), bitmap.width - w));
+                  const y = Math.max(0, Math.min(Math.round(bbox.top), bitmap.height - h));
+                  const canvas = new OffscreenCanvas(w, h);
+                  const ctx = canvas.getContext("2d");
+                  ctx.drawImage(bitmap, x, y, w, h, 0, 0, w, h);
+                  const croppedBlob = await canvas.convertToBlob({ type: "image/png" });
+                  const croppedB64 = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(croppedBlob);
+                  });
+                  payload.image_data = croppedB64 || dataUrl;
+                } catch (_) {
+                  payload.image_data = dataUrl;
+                }
+              } else {
+                payload.image_data = dataUrl;
+              }
+            }
+            executeSolveFetch();
+          });
+        } catch (_) {
+          executeSolveFetch();
+        }
+      } else {
+        executeSolveFetch();
+      }
+    });
     return true; // asynchronous response
   }
 
@@ -945,7 +1517,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // 4. Opt-in DOM highlight on active tab
-  if (action === "APPLY_HIGHLIGHT") {
+  if (action === "APPLY_HIGHLIGHT" || action === "APPLY_DOM_HIGHLIGHT") {
     resolveTargetTab(message, sender).then(async (targetTab) => {
       if (!targetTab || !targetTab.id) {
         sendResponse({ success: false, error: "No active tab found." });
@@ -1372,6 +1944,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     resolveTargetTab(message, sender).then(async (targetTab) => {
       const res = await handleTriggerAutoLoop(message, targetTab);
       sendResponse(res);
+    }).catch((err) => {
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+
+  // 17. Trigger Auto Mode from Web Page / Bridge
+  if (action === "TRIGGER_AUTO" || action === "TRIGGER_AUTO_MODE") {
+    resolveTargetTab(message, sender).then(async (targetTab) => {
+      if (isSidePanelOpen) {
+        chrome.runtime.sendMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_auto" }).catch(() => {});
+        sendResponse({ success: true, forwarded_to_sidepanel: true });
+        return;
+      }
+      const res = await handleUnifiedCommand("trigger_auto", targetTab);
+      sendResponse(res || { success: true });
     }).catch((err) => {
       sendResponse({ success: false, error: err.message });
     });

@@ -35,45 +35,290 @@
   }
 
   /**
+   * Helper that decodes URL-encoded parameters or CloudFront URL fragments.
+   * Handles multi-pass percent-encoding up to 3 times (e.g. https%3A%2F%2F...).
+   */
+  function decodePotentialUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== "string") return "";
+    let u = rawUrl.trim();
+    for (let i = 0; i < 3; i++) {
+      if (u.includes("%3A") || u.includes("%2F") || u.includes("%3a") || u.includes("%2f")) {
+        try {
+          const dec = decodeURIComponent(u);
+          if (dec === u) break;
+          u = dec;
+        } catch (_) {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+    return u;
+  }
+
+  /**
    * Checks whether valid quiz options (radios, checkboxes, option cards, or MCQ practice header)
    * exist on the page outside any code editor.
+   * Strict MCQ vs Code Rule: If the page has >= 2 clickable options or option cards,
+   * it MUST return true (indicating quiz mode), even on coding practice pages.
    */
   function hasQuizOptionsOutsideEditor(docRef) {
     const doc = docRef || (typeof document !== "undefined" ? document : null);
     if (!doc) return false;
     try {
-      // 1. Check for header containing "MCQ PRACTICE" or "QUIZ" (strictly excluding "CODING PRACTICE")
-      const headerText = (doc.body ? (doc.body.innerText || doc.body.textContent || "") : (doc.documentElement ? doc.documentElement.textContent || "" : "")).slice(0, 1500).toLowerCase();
-      const isCodingHeader = /coding\s*practice/i.test(headerText);
-      const hasQuizHeader = !isCodingHeader && (/mcq\s*practice|practice\s*\|\s*|quiz\b/i.test(headerText));
-
-      // 2. Check for radio buttons outside code editor
+      // 1. Check for radio buttons outside code editor
       const allRadios = doc.querySelectorAll ? Array.from(doc.querySelectorAll("input[type='radio']")) : [];
       const radios = allRadios.filter(r => !isInsideCodeEditor(r));
       if (radios.length >= 2) return true;
 
-      // 3. Check for checkboxes outside code editor
+      // 2. Check for checkboxes outside code editor
       const allCheckboxes = doc.querySelectorAll ? Array.from(doc.querySelectorAll("input[type='checkbox'], [role='checkbox']")) : [];
       const checkboxes = allCheckboxes.filter(c => !isInsideCodeEditor(c) && !isQuizZyInternalElement(c));
       if (checkboxes.length >= 2) return true;
 
-      // 4. Check for option elements outside code editor
-      const candidateEls = doc.querySelectorAll ? Array.from(doc.querySelectorAll(".quiz-option, [data-quiz-option], [class*='radio-item'], [class*='option-item'], [role='radio'], [role='option'], [data-rbd-draggable-id]")) : [];
+      // 3. Check for option elements outside code editor (including styled-components option cards)
+      const candidateEls = doc.querySelectorAll ? Array.from(doc.querySelectorAll(
+        ".quiz-option, [data-quiz-option], [class*='radio-item'], [class*='option-item'], [class*='choice-item'], [role='radio'], [role='option'], [data-rbd-draggable-id], [class*='optionCard'], [class*='option-card']"
+      )) : [];
       const optionCandidates = candidateEls.filter(el => !isInsideCodeEditor(el) && !isQuizZyInternalElement(el) && isVisible(el));
       if (optionCandidates.length >= 2) return true;
 
-      // 5. Check for SUBMIT + (SHOW ANSWER or SKIP) buttons alongside options or header (never on pure coding page)
-      if (!isCodingHeader) {
-        const buttons = doc.querySelectorAll ? Array.from(doc.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn")).filter(b => !isInsideCodeEditor(b)) : [];
-        const btnTexts = buttons.map(b => (b.innerText || b.textContent || b.value || "").trim().toLowerCase());
-        const hasSubmit = btnTexts.some(t => /^(?:submit|submit\s*answer)$/i.test(t));
-        const hasShowOrSkip = btnTexts.some(t => /^(?:show\s*answer|skip)$/i.test(t));
-        if (hasSubmit && (hasShowOrSkip || hasQuizHeader)) {
-          return true;
-        }
+      // 4. Classless styled-components option group discovery (e.g. learning.ccbp.in)
+      if (typeof findClasslessOptionElements === "function") {
+        const classless = findClasslessOptionElements(doc, doc);
+        if (classless && classless.length >= 2) return true;
+      }
+
+      // 5. Check for header containing "MCQ PRACTICE" or "QUIZ"
+      const headerText = (doc.body ? (doc.body.innerText || doc.body.textContent || "") : (doc.documentElement ? doc.documentElement.textContent || "" : "")).slice(0, 1500).toLowerCase();
+      const isCodingHeader = /coding\s*practice/i.test(headerText);
+      const hasQuizHeader = !isCodingHeader && (/mcq\s*practice|practice\s*\|\s*|quiz\b/i.test(headerText));
+
+      // 6. Check for SUBMIT + (SHOW ANSWER or SKIP) buttons alongside options or header
+      const buttons = doc.querySelectorAll ? Array.from(doc.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn")).filter(b => !isInsideCodeEditor(b)) : [];
+      const btnTexts = buttons.map(b => (b.innerText || b.textContent || b.value || "").trim().toLowerCase());
+      const hasSubmit = btnTexts.some(t => /^(?:submit|submit\s*answer)$/i.test(t));
+      const hasShowOrSkip = btnTexts.some(t => /^(?:show\s*answer|skip)$/i.test(t));
+      if (hasSubmit && (hasShowOrSkip || hasQuizHeader)) {
+        return true;
       }
     } catch (_) {}
     return false;
+  }
+
+  /**
+   * Helper that strips gutter elements and line numbers cleanly from extracted code text.
+   */
+  function extractCodeLinesWithoutGutters(el) {
+    if (!el) return [];
+    let clone;
+    try {
+      clone = el.cloneNode(true);
+      const gutterEls = clone.querySelectorAll(
+        ".ace_gutter, .line-numbers, .linenumber, [class*='gutter'], [class*='line-number'], [class*='linenumber'], [class*='lineNumbers'], .react-syntax-highlighter-line-number"
+      );
+      for (const g of gutterEls) {
+        try { g.remove(); } catch (_) {}
+      }
+    } catch (_) {
+      clone = el;
+    }
+
+    const raw = (clone.textContent || clone.innerText || "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/\u00a0/g, " ");
+
+    const lines = raw.split("\n");
+    const result = [];
+    for (const line of lines) {
+      // Strip standalone leading line numbers (e.g. " 1  int maxDownPath" or "1: maxDownPath" or "1 | maxDownPath")
+      const stripped = line.replace(/^\s*\d{1,4}(?:\s*[:\|]\s*|\s{2,})/, "  ");
+      result.push(stripped);
+    }
+    return result;
+  }
+
+  function cleanCodeSnippet(raw) {
+    if (!raw) return "";
+    const lines = raw.split("\n");
+    while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+    return lines.join("\n");
+  }
+
+  /**
+   * Complete Scrollable / Swipeable Code Box Extractor.
+   * Extracts 100% of code from Ace, Monaco, CodeMirror, Prism, or pre/code blocks
+   * located inside or adjacent to the question container.
+   * Steps virtualized scrollers, strips line-number gutters, and captures multi-line code.
+   */
+  function extractFullCodeSnippets(containerEl, docRef) {
+    const doc = docRef || (typeof document !== "undefined" ? document : null);
+    if (!doc) return "";
+
+    const snippets = [];
+
+    try {
+      const root = containerEl || doc;
+
+      // 1. Check Ace editors
+      const aceEditors = Array.from(root.querySelectorAll ? root.querySelectorAll(".ace_editor, [class*='ace_editor']") : []);
+      for (const editor of aceEditors) {
+        let code = "";
+        try {
+          if (editor.env && editor.env.editor && typeof editor.env.editor.getValue === "function") {
+            code = editor.env.editor.getValue();
+          } else if (typeof window !== "undefined" && window.ace && typeof window.ace.edit === "function") {
+            const ed = window.ace.edit(editor);
+            if (ed && typeof ed.getValue === "function") {
+              code = ed.getValue();
+            }
+          }
+        } catch (_) {}
+
+        if (!code) {
+          const scroller = editor.querySelector(".ace_scroller") || editor;
+          const textLayer = editor.querySelector(".ace_text-layer");
+          if (scroller && textLayer) {
+            const linesCollected = new Set();
+            const origTop = scroller.scrollTop;
+            const origLeft = scroller.scrollLeft;
+            const clientH = scroller.clientHeight || 200;
+            const scrollH = scroller.scrollHeight || clientH;
+
+            for (let top = 0; top <= scrollH; top += Math.max(40, clientH * 0.75)) {
+              try { scroller.scrollTop = top; } catch (_) {}
+              const renderedLines = Array.from(textLayer.querySelectorAll(".ace_line"));
+              for (const lineEl of renderedLines) {
+                const t = (lineEl.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "");
+                if (t.trim()) linesCollected.add(t);
+              }
+            }
+            try {
+              scroller.scrollTop = origTop;
+              scroller.scrollLeft = origLeft;
+            } catch (_) {}
+
+            if (linesCollected.size > 0) {
+              code = Array.from(linesCollected).join("\n");
+            }
+          }
+        }
+
+        if (code && code.trim().length >= 10) {
+          snippets.push(cleanCodeSnippet(code));
+        }
+      }
+
+      // 2. Check Monaco editors
+      const monacoEditors = Array.from(root.querySelectorAll ? root.querySelectorAll(".monaco-editor, [class*='monaco-editor']") : []);
+      for (const editor of monacoEditors) {
+        let code = "";
+        try {
+          if (typeof window !== "undefined" && window.monaco && window.monaco.editor) {
+            const models = window.monaco.editor.getModels ? window.monaco.editor.getModels() : [];
+            if (models.length > 0 && typeof models[0].getValue === "function") {
+              code = models[0].getValue();
+            }
+          }
+        } catch (_) {}
+
+        if (!code) {
+          const viewLines = Array.from(editor.querySelectorAll(".view-lines .view-line, .view-line"));
+          if (viewLines.length > 0) {
+            const sortedLines = viewLines.slice().sort((a, b) => {
+              let topA = a.style && a.style.top ? parseFloat(a.style.top) : NaN;
+              let topB = b.style && b.style.top ? parseFloat(b.style.top) : NaN;
+              return (isNaN(topA) || isNaN(topB)) ? 0 : topA - topB;
+            });
+            code = sortedLines.map(el => (el.textContent || "").replace(/\u00a0/g, " ")).join("\n");
+          }
+        }
+
+        if (code && code.trim().length >= 10) {
+          snippets.push(cleanCodeSnippet(code));
+        }
+      }
+
+      // 3. Check CodeMirror
+      const cmEditors = Array.from(root.querySelectorAll ? root.querySelectorAll(".cm-editor, .CodeMirror") : []);
+      for (const editor of cmEditors) {
+        let code = "";
+        try {
+          if (editor.CodeMirror && typeof editor.CodeMirror.getValue === "function") {
+            code = editor.CodeMirror.getValue();
+          }
+        } catch (_) {}
+        if (!code) {
+          const cmLines = Array.from(editor.querySelectorAll(".cm-line, .CodeMirror-line"));
+          if (cmLines.length > 0) {
+            code = cmLines.map(el => (el.textContent || "").replace(/\u00a0/g, " ")).join("\n");
+          }
+        }
+        if (code && code.trim().length >= 10) {
+          snippets.push(cleanCodeSnippet(code));
+        }
+      }
+
+      // 4. Scrollable / Swipeable Code Containers, Prism, pre, code blocks
+      const codeBoxes = Array.from(root.querySelectorAll ? root.querySelectorAll(
+        "pre, code, .prism-code, [class*='code-block'], [class*='code-container'], [class*='codeBlock'], [class*='codeContainer'], [class*='syntax-highlighter'], [class*='highlight']"
+      ) : []).filter(el => {
+        if (!isVisible(el)) return false;
+        if (isInsideCodeEditor(el)) return false;
+        const txt = (el.textContent || "").trim();
+        return txt.length >= 15 && (txt.includes("\n") || txt.includes("{") || txt.includes(";") || txt.includes("def ") || txt.includes("function") || txt.includes("class "));
+      });
+
+      for (const box of codeBoxes) {
+        if (codeBoxes.some(parent => parent !== box && parent.contains(box))) continue;
+
+        let harvestedCode = "";
+        const scroller = (box.scrollHeight > box.clientHeight + 5 || box.scrollWidth > box.clientWidth + 5)
+          ? box
+          : (box.parentElement && (box.parentElement.scrollHeight > box.parentElement.clientHeight + 5) ? box.parentElement : null);
+
+        if (scroller && scroller.scrollHeight > scroller.clientHeight + 10) {
+          const linesSet = new Set();
+          const origTop = scroller.scrollTop;
+          const origLeft = scroller.scrollLeft;
+          const clientH = scroller.clientHeight || 200;
+          const scrollH = scroller.scrollHeight || clientH;
+
+          for (let top = 0; top <= scrollH; top += Math.max(30, clientH * 0.75)) {
+            try { scroller.scrollTop = top; } catch (_) {}
+            const textNodes = extractCodeLinesWithoutGutters(box);
+            for (const l of textNodes) {
+              if (l.trim()) linesSet.add(l);
+            }
+          }
+          try {
+            scroller.scrollTop = origTop;
+            scroller.scrollLeft = origLeft;
+          } catch (_) {}
+
+          if (linesSet.size > 0) {
+            harvestedCode = Array.from(linesSet).join("\n");
+          }
+        }
+
+        if (!harvestedCode) {
+          harvestedCode = extractCodeLinesWithoutGutters(box).join("\n");
+        }
+
+        if (harvestedCode && harvestedCode.trim().length >= 15) {
+          const clean = cleanCodeSnippet(harvestedCode);
+          if (clean && !snippets.includes(clean)) {
+            snippets.push(clean);
+          }
+        }
+      }
+    } catch (_) {}
+
+    return snippets.join("\n\n");
   }
 
   /**
@@ -168,6 +413,398 @@
     } catch (_) {}
 
     return "";
+  }
+
+  /**
+   * Deep SVG Graph & Tree Topology Extractor.
+   * Extracts all nodes (<circle>, <rect>, <text>) and connections (<line>, <path>),
+   * matches edges via Euclidean proximity, orders parent-child relationships,
+   * traces all leaf-to-leaf paths, and calculates exact tree diameter.
+   */
+  function extractSvgGraphTopology(svgEl) {
+    if (!svgEl) return null;
+    try {
+      // 1. Collect all shapes that could be node containers (<circle>, <rect>, <ellipse>)
+      const shapes = [];
+      const circles = Array.from(svgEl.querySelectorAll ? svgEl.querySelectorAll("circle") : []);
+      for (const c of circles) {
+        let cx = parseFloat(c.getAttribute ? c.getAttribute("cx") : 0);
+        let cy = parseFloat(c.getAttribute ? c.getAttribute("cy") : 0);
+        let r = parseFloat(c.getAttribute ? c.getAttribute("r") : 15);
+        if (isNaN(cx) || isNaN(cy)) {
+          if (typeof c.getBoundingClientRect === "function") {
+            const rect = c.getBoundingClientRect();
+            cx = rect.left + rect.width / 2;
+            cy = rect.top + rect.height / 2;
+          }
+        }
+        if (!isNaN(cx) && !isNaN(cy)) {
+          shapes.push({ type: "circle", cx, cy, r: isNaN(r) ? 15 : r });
+        }
+      }
+
+      const rects = Array.from(svgEl.querySelectorAll ? svgEl.querySelectorAll("rect") : []);
+      for (const r of rects) {
+        let w = parseFloat(r.getAttribute ? r.getAttribute("width") : 0);
+        let h = parseFloat(r.getAttribute ? r.getAttribute("height") : 0);
+        if (w >= 10 && h >= 10 && w <= 300 && h <= 300) {
+          let x = parseFloat(r.getAttribute ? r.getAttribute("x") : 0);
+          let y = parseFloat(r.getAttribute ? r.getAttribute("y") : 0);
+          if (!isNaN(x) && !isNaN(y)) {
+            shapes.push({ type: "rect", cx: x + w / 2, cy: y + h / 2, r: Math.max(w, h) / 2 });
+          }
+        }
+      }
+
+      // 2. Collect all text labels (<text>, <tspan>)
+      const textEls = Array.from(svgEl.querySelectorAll ? svgEl.querySelectorAll("text, tspan") : []);
+      const rawLabels = [];
+      for (const t of textEls) {
+        const txt = (t.textContent || t.innerText || "").trim();
+        if (!txt) continue;
+        let x = parseFloat(t.getAttribute ? t.getAttribute("x") : 0);
+        let y = parseFloat(t.getAttribute ? t.getAttribute("y") : 0);
+        if (isNaN(x) || isNaN(y)) {
+          if (typeof t.getBoundingClientRect === "function") {
+            const rect = t.getBoundingClientRect();
+            x = rect.left;
+            y = rect.top;
+          }
+        }
+        if (!isNaN(x) && !isNaN(y)) {
+          rawLabels.push({ text: txt, x, y, el: t });
+        }
+      }
+
+      if (rawLabels.length === 0) return null;
+
+      // Deduplicate labels if tspan is nested inside text
+      const filteredLabels = [];
+      for (const l of rawLabels) {
+        const isDupe = filteredLabels.some(existing => existing.text === l.text && Math.hypot(existing.x - l.x, existing.y - l.y) < 10);
+        if (!isDupe) {
+          filteredLabels.push(l);
+        }
+      }
+
+      // 3. Form Nodes: associate each label with nearest shape center (or label's own position)
+      const nodes = [];
+      for (let i = 0; i < filteredLabels.length; i++) {
+        const l = filteredLabels[i];
+        let bestShape = null;
+        let minDist = 45.0; // max radius to associate shape to text
+        for (const s of shapes) {
+          const d = Math.hypot(s.cx - l.x, s.cy - l.y);
+          if (d < minDist) {
+            minDist = d;
+            bestShape = s;
+          }
+        }
+        const nx = bestShape ? bestShape.cx : l.x;
+        const ny = bestShape ? bestShape.cy : l.y;
+        nodes.push({
+          id: `node_${i}`,
+          label: l.text,
+          x: Math.round(nx),
+          y: Math.round(ny)
+        });
+      }
+
+      // Sort nodes top-to-bottom, left-to-right
+      nodes.sort((a, b) => (Math.abs(a.y - b.y) > 15 ? a.y - b.y : a.x - b.x));
+
+      // 4. Collect Lines and Paths (Edges)
+      const lines = [];
+      const lineEls = Array.from(svgEl.querySelectorAll ? svgEl.querySelectorAll("line") : []);
+      for (const line of lineEls) {
+        let x1 = parseFloat(line.getAttribute ? line.getAttribute("x1") : 0);
+        let y1 = parseFloat(line.getAttribute ? line.getAttribute("y1") : 0);
+        let x2 = parseFloat(line.getAttribute ? line.getAttribute("x2") : 0);
+        let y2 = parseFloat(line.getAttribute ? line.getAttribute("y2") : 0);
+        if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+          lines.push({ x1, y1, x2, y2 });
+        }
+      }
+
+      const pathEls = Array.from(svgEl.querySelectorAll ? svgEl.querySelectorAll("path") : []);
+      for (const p of pathEls) {
+        const d = (p.getAttribute ? p.getAttribute("d") : "") || "";
+        const nums = d.match(/[-+]?[0-9]*\.?[0-9]+/g);
+        if (nums && nums.length >= 4) {
+          const x1 = parseFloat(nums[0]);
+          const y1 = parseFloat(nums[1]);
+          const x2 = parseFloat(nums[nums.length - 2]);
+          const y2 = parseFloat(nums[nums.length - 1]);
+          if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+            if (Math.hypot(x2 - x1, y2 - y1) >= 15) {
+              lines.push({ x1, y1, x2, y2 });
+            }
+          }
+        }
+      }
+
+      // 5. Match lines to nodes to create explicit Edges
+      const edges = [];
+      const edgeKeySet = new Set();
+      const adj = {};
+      const childrenMap = {};
+      const parentMap = {};
+      for (const n of nodes) {
+        adj[n.label] = [];
+        childrenMap[n.label] = [];
+      }
+
+      for (const l of lines) {
+        let bestA = null, minDistA = 70.0;
+        let bestB = null, minDistB = 70.0;
+        for (const n of nodes) {
+          const dA = Math.hypot(n.x - l.x1, n.y - l.y1);
+          if (dA < minDistA) {
+            minDistA = dA;
+            bestA = n;
+          }
+          const dB = Math.hypot(n.x - l.x2, n.y - l.y2);
+          if (dB < minDistB) {
+            minDistB = dB;
+            bestB = n;
+          }
+        }
+
+        if (bestA && bestB && bestA.label !== bestB.label) {
+          const parent = bestA.y <= bestB.y ? bestA : bestB;
+          const child = bestA.y <= bestB.y ? bestB : bestA;
+          const edgeKey = `${parent.label}->${child.label}`;
+          if (!edgeKeySet.has(edgeKey)) {
+            edgeKeySet.add(edgeKey);
+            const isLeft = child.x < parent.x;
+            const dir = isLeft ? "left child" : "right child";
+            edges.push({ parent: parent.label, child: child.label, dir });
+            adj[parent.label].push(child.label);
+            adj[child.label].push(parent.label);
+            childrenMap[parent.label].push(child.label);
+            parentMap[child.label] = parent.label;
+          }
+        }
+      }
+
+      // 6. Graph Analysis (Root, Leaves, Longest Path Diameter)
+      const allLabels = nodes.map(n => n.label);
+      const rootCandidates = allLabels.filter(lbl => !parentMap[lbl] && (childrenMap[lbl] || []).length > 0);
+      const root = rootCandidates.length > 0 ? rootCandidates[0] : allLabels[0];
+      const leaves = allLabels.filter(lbl => (childrenMap[lbl] || []).length === 0);
+
+      // BFS shortest path between any two nodes
+      function findPath(start, target) {
+        if (start === target) return [start];
+        const queue = [[start]];
+        const visited = new Set([start]);
+        while (queue.length > 0) {
+          const path = queue.shift();
+          const curr = path[path.length - 1];
+          for (const neighbor of (adj[curr] || [])) {
+            if (!visited.has(neighbor)) {
+              visited.add(neighbor);
+              const newPath = path.concat([neighbor]);
+              if (neighbor === target) return newPath;
+              queue.push(newPath);
+            }
+          }
+        }
+        return null;
+      }
+
+      let longestPath = [];
+      for (let i = 0; i < leaves.length; i++) {
+        for (let j = i + 1; j < leaves.length; j++) {
+          const p = findPath(leaves[i], leaves[j]);
+          if (p && p.length > longestPath.length) {
+            longestPath = p;
+          }
+        }
+      }
+
+      if (longestPath.length === 0) {
+        for (let i = 0; i < allLabels.length; i++) {
+          for (let j = i + 1; j < allLabels.length; j++) {
+            const p = findPath(allLabels[i], allLabels[j]);
+            if (p && p.length > longestPath.length) {
+              longestPath = p;
+            }
+          }
+        }
+      }
+
+      const diameterEdges = Math.max(0, longestPath.length - 1);
+      const diameterNodes = longestPath.length;
+
+      // Construct output string
+      const linesOut = [
+        "[EXTRACTED DIAGRAM STRUCTURE]",
+        `SVG Tree/Graph Diagram with ${nodes.length} nodes:`,
+        "Nodes:"
+      ];
+      for (const n of nodes) {
+        linesOut.push(`- Node "${n.label}" at pos (${n.x}, ${n.y})`);
+      }
+      if (edges.length > 0) {
+        linesOut.push("Edges:");
+        for (const e of edges) {
+          linesOut.push(`- Edge: Node "${e.parent}" -> Node "${e.child}" (${e.dir})`);
+        }
+      }
+      linesOut.push("Graph Topology Analysis:");
+      linesOut.push(`- Root Node: "${root}"`);
+      linesOut.push(`- Leaf Nodes: ${leaves.map(l => `"${l}"`).join(", ")}`);
+      if (longestPath.length > 0) {
+        linesOut.push(`- Longest Path: ${longestPath.join(" -> ")}`);
+        linesOut.push(`- Longest Path Edges (Diameter): ${diameterEdges}`);
+        linesOut.push(`- Nodes on Longest Path: ${diameterNodes}`);
+      }
+
+      return linesOut.join("\n");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Scans question container for visual diagrams (SVG trees, graphs, canvas, or img)
+   * and extracts both structured topology summary (nodes, edges, longest path)
+   * and raster image data / URLs. Never emits data:image/svg+xml as image_data.
+   */
+  function extractVisualContext(containerEl, docRef) {
+    const doc = docRef || (typeof document !== "undefined" ? document : null);
+    if (!containerEl || !doc) {
+      return { image_data: null, image_url: null, diagram_structure: null, bounding_box: null };
+    }
+
+    // Never scan the entire document root for random page images/logos if no quiz card was identified
+    if (containerEl === doc || containerEl === doc.body || containerEl === doc.documentElement) {
+      return { image_data: null, image_url: null, diagram_structure: null, bounding_box: null };
+    }
+
+    try {
+      const svgs = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("svg") : []).filter(s => {
+        try {
+          const rect = s.getBoundingClientRect ? s.getBoundingClientRect() : { width: 0, height: 0 };
+          if (rect.width < 50 || rect.height < 50) return false;
+          const cls = (s.getAttribute ? (s.getAttribute("class") || "") : "").toLowerCase();
+          if (cls.includes("icon") || cls.includes("btn") || cls.includes("check") || cls.includes("arrow") || cls.includes("close")) return false;
+          // Real diagrams usually contain multiple graphic elements (nodes, edges, shapes)
+          const shapes = s.querySelectorAll ? s.querySelectorAll("circle, line, path, text, rect") : [];
+          return shapes.length >= 3;
+        } catch (_) {
+          return true;
+        }
+      });
+
+      const imgs = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("img") : []).filter(img => {
+        try {
+          const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : { width: 0, height: 0 };
+          const w = img.naturalWidth || rect.width || 0;
+          const h = img.naturalHeight || rect.height || 0;
+          const src = (img.getAttribute ? (img.getAttribute("src") || "") : (img.src || "")).toLowerCase();
+          const isDecorative = (
+            src.includes("logo") ||
+            src.includes("avatar") ||
+            src.includes("icon") ||
+            src.includes("banner") ||
+            src.includes("header") ||
+            src.includes("brand") ||
+            src.includes("profile") ||
+            src.includes("user") ||
+            src.includes("spacer") ||
+            src.includes("badge") ||
+            src.includes("button")
+          );
+          return (w >= 50 && h >= 40) && !isDecorative;
+        } catch (_) {
+          return true;
+        }
+      });
+
+      const canvases = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("canvas") : []).filter(c => {
+        try {
+          const rect = c.getBoundingClientRect ? c.getBoundingClientRect() : { width: 0, height: 0 };
+          return rect.width >= 40 && rect.height >= 40;
+        } catch (_) {
+          return true;
+        }
+      });
+
+      let image_data = null;
+      let image_url = null;
+      let diagram_structure = null;
+      let bounding_box = null;
+
+      // 1. Process SVG (extract full node + edge topology)
+      if (svgs.length > 0) {
+        const targetSvg = svgs[0];
+        try {
+          if (typeof targetSvg.getBoundingClientRect === "function") {
+            const rect = targetSvg.getBoundingClientRect();
+            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+          }
+        } catch (_) {}
+
+        diagram_structure = extractSvgGraphTopology(targetSvg);
+        // Note: Do NOT serialize to data:image/svg+xml! Vision APIs reject SVG with HTTP 400.
+        // Bounding box is recorded so background.js can crop a clean PNG tab capture if needed.
+      }
+
+      // 2. Process IMG
+      if (imgs.length > 0) {
+        const targetImg = imgs[0];
+        try {
+          if (typeof targetImg.getBoundingClientRect === "function") {
+            const rect = targetImg.getBoundingClientRect();
+            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+          }
+        } catch (_) {}
+
+        let rawSrc = (targetImg.getAttribute ? targetImg.getAttribute("src") : targetImg.src) || targetImg.src || "";
+        const src = decodePotentialUrl(rawSrc);
+        if (src.startsWith("data:image/png") || src.startsWith("data:image/jpeg") || src.startsWith("data:image/webp")) {
+          image_data = src;
+        } else if (src.startsWith("http://") || src.startsWith("https://")) {
+          image_url = src;
+          // Attempt canvas rasterization if not tainted by CORS
+          if (typeof document !== "undefined" && typeof document.createElement === "function") {
+            try {
+              const offCanvas = document.createElement("canvas");
+              offCanvas.width = targetImg.naturalWidth || targetImg.width || 300;
+              offCanvas.height = targetImg.naturalHeight || targetImg.height || 300;
+              const ctx = offCanvas.getContext("2d");
+              ctx.drawImage(targetImg, 0, 0);
+              const dataUrl = offCanvas.toDataURL("image/png");
+              if (dataUrl && dataUrl.startsWith("data:image/png")) {
+                image_data = dataUrl;
+              }
+            } catch (_) {
+              // CORS SecurityError: image_data remains null, image_url is fetched by background/backend
+            }
+          }
+        }
+      }
+
+      // 3. Process CANVAS
+      if (!image_data && canvases.length > 0) {
+        const targetCanvas = canvases[0];
+        try {
+          if (typeof targetCanvas.getBoundingClientRect === "function") {
+            const rect = targetCanvas.getBoundingClientRect();
+            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+          }
+          if (typeof targetCanvas.toDataURL === "function") {
+            image_data = targetCanvas.toDataURL("image/png");
+          }
+        } catch (_) {}
+      }
+
+      return { image_data, image_url, diagram_structure, bounding_box };
+    } catch (_) {
+      return { image_data: null, image_url: null, diagram_structure: null, bounding_box: null };
+    }
   }
 
   /**
@@ -529,6 +1166,14 @@
         }
       }
 
+      // Inline code badges: pad with spaces so words never concatenate (e.g. `maxPathSum`, `N`)
+      if (tag === "code" || tag === "kbd" || tag === "samp" || cls.includes("badge") || cls.includes("inline-code") || cls.includes("code-badge")) {
+        const fullContent = (node.textContent || node.innerText || "").replace(/[\u200B-\u200D\uFEFF]/g, "");
+        if (!fullContent.includes("\n") && fullContent.trim().length > 0 && fullContent.trim().length <= 60) {
+          return " " + fullContent.trim() + " ";
+        }
+      }
+
       // Skip radio/checkbox inputs from contributing raw value text
       if (tag === "input" && (node.type === "radio" || node.type === "checkbox")) {
         return "";
@@ -540,12 +1185,14 @@
         if (alt && alt.trim()) {
           return " [Image: " + cleanText(alt) + "] ";
         }
-        const src = node.getAttribute ? (node.getAttribute("src") || node.getAttribute("data-src")) : null;
+        let src = node.getAttribute ? (node.getAttribute("src") || node.getAttribute("data-src")) : null;
         if (src && src.trim()) {
+          src = decodePotentialUrl(src);
           const parts = src.split("/").pop().split("?")[0];
           if (parts && parts.length > 2 && !parts.includes("spacer") && !parts.includes("blank")) {
             return " [Image: " + cleanText(parts) + "] ";
           }
+          return " [Image: " + cleanText(src) + "] ";
         }
         return " [Image] ";
       }
@@ -2007,14 +2654,30 @@
       }
     }
 
-    // Split-pane reference code context extraction (e.g. Monaco/Ace/CodeMirror on learning.ccbp.in/primitive-coding/practice)
-    const splitPaneCode = extractSplitPaneCodeContext(quizCard, doc);
+    // Complete Code Snippet extraction (scrollable/swipeable boxes, Ace, Monaco, CodeMirror, Prism, pre)
+    const fullSnippet = extractFullCodeSnippets(quizCard || doc, doc) || extractSplitPaneCodeContext(quizCard, doc);
     let codeContext = "";
-    if (splitPaneCode && splitPaneCode.trim().length > 0) {
-      const trimmedCode = splitPaneCode.trim();
+    if (fullSnippet && fullSnippet.trim().length > 0) {
+      const trimmedCode = fullSnippet.trim();
       codeContext = trimmedCode;
       if (!question.includes(trimmedCode)) {
-        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\``;
+        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\`\n\n[CODE SNIPPET]:\n${trimmedCode}`;
+      }
+    }
+
+    // Extract visual diagram / tree context if present
+    const visualContext = extractVisualContext(quizCard || doc, doc);
+    let imageData = visualContext.image_data || null;
+    let imageUrl = visualContext.image_url || null;
+    if (visualContext.diagram_structure && !question.includes("[EXTRACTED DIAGRAM STRUCTURE]")) {
+      question = `${question}\n\n${visualContext.diagram_structure}`;
+    }
+
+    // Extract and decode image_url from [Image: ...] tag if not already set
+    if (!imageUrl && question) {
+      const imgMatch = question.match(/\[Image:\s*(https?:\/\/[^\s\]]+|https?%3A[^\s\]]+)\]/i);
+      if (imgMatch && imgMatch[1]) {
+        imageUrl = decodePotentialUrl(imgMatch[1]);
       }
     }
 
@@ -2030,6 +2693,8 @@
       q_type: qType,
       question: question,
       options: options,
+      image_data: imageData,
+      image_url: imageUrl,
       optionSelectors: optionSelectors,
       dragHandleSelectors: dragHandleSelectors,
       meta: {
@@ -2039,7 +2704,11 @@
         options_count: options.length,
         option_selectors: optionSelectors,
         drag_handle_selectors: dragHandleSelectors,
-        code_context: codeContext || undefined
+        code_context: codeContext || undefined,
+        image_data: imageData,
+        image_url: imageUrl,
+        has_visual_diagram: !!imageData || !!imageUrl || !!visualContext.diagram_structure,
+        visual_bounding_box: visualContext.bounding_box || undefined
       }
     };
 
@@ -2157,8 +2826,28 @@
     return { success: true, highlighted: false };
   }
 
+  /**
+   * Authoritative client-side validation guard.
+   * Ensures an extracted question has a non-empty question stem and sufficient options
+   * before any solver request is dispatched to the backend.
+   */
+  function isValidExtractedQuestion(q) {
+    if (!q) return false;
+    const stem = (q.stem || q.question_text || q.question || "").trim();
+    if (stem.length < 2) return false;
+    const type = (q.q_type || "mcq").toLowerCase();
+    if (["mcq", "multi", "order"].includes(type)) {
+      const validOpts = Array.isArray(q.options)
+        ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+        : [];
+      if (validOpts.length < 2) return false;
+    }
+    return true;
+  }
+
   // Export to window for Chrome extension scripting and module for Node testing
   const QuizZyExtractor = {
+    isValidExtractedQuestion,
     cleanText,
     normalizeTeX,
     stripDecorativePrefix,
@@ -2173,6 +2862,8 @@
     getElementCssPath,
     deduplicateOptionElements,
     resolveOptionRowRoot,
+    extractSvgGraphTopology,
+    extractVisualContext,
     extractQuizFromDom,
     extractCodingQuestionFromDom,
     extractCodingProblem,
@@ -2183,6 +2874,8 @@
     isInsideCodeEditor,
     hasQuizOptionsOutsideEditor,
     extractSplitPaneCodeContext,
+    extractFullCodeSnippets,
+    decodePotentialUrl,
     findDragHandleInRow
   };
 
