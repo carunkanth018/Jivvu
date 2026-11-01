@@ -1,8 +1,10 @@
 # QuizZy Project State
 
-## Current Milestone: Comprehensive Code Review & Robustness Hardening
+## Current Milestone: Production Release Pushed to GitHub
 - **Status**: Production-Ready / All 151 Pytest Tests Passing (100% Pass Rate).
 - **Offline Benchmark**: 15/15 Coding Benchmark Passed (100%) & All Self-Tests Passed (100%).
+- **Primary Repository**: `https://github.com/codewithjaswanth/Jevs.git` (`origin/main`).
+- **Upstream Repository**: `https://github.com/pavansaikavuri/Jev.git` (`upstream/main`).
 - **Core Architecture**: Chrome Manifest V3 Extension + FastAPI Python Backend (`127.0.0.1:8000`).
 - **Backend Service**: Active with Hot-Reload on `http://127.0.0.1:8000` (verified via `/health` 200 OK).
 - **Native Host**: Registered at `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.launcher`.
