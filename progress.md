@@ -532,13 +532,43 @@ Implemented and strictly verified across live `learning.ccbp.in` question models
   3. **Strict Empty-Code Guardrail:**
      - Enforces `if (!targetCode || !targetCode.trim()) return { success: false, error: "Empty code payload rejected: refusing to wipe editor buffer" }` across both `background.js` and `executor.js`.
 - **Verification Suite:**
-  - **Full Pytest Suite:** **113/113 passing (100%)** in 61s across all 18 test modules.
+  - **Full Pytest Suite:** **151/151 passing (100%)** across all 20 test modules.
   - **Phase 7 Coding Automation Engine Suite:** **16/16 passing (100%)**.
   - **Phase 7 Coding and Stealth Suite:** **6/6 passing (100%)**.
   - All contracts (`window.monaco.editor.getModels()`, `window.ace.edit`) preserved.
 
+### 10.11 Shift Auto Mode Toggle, Corner Anchoring, Ctrl Reset & Native Messaging Backend Launcher
+- **Problem Statements & User Requirements:**
+  1. Pressing `Shift` must reliably toggle Auto Mode on and off (start automation on first press, stop on second press).
+  2. The dot must be permanently anchored at the bottom-right corner and must never track or follow the cursor.
+  3. Pressing `Ctrl` must instantly reset the dot back to the corner coordinates and toggle dot visibility.
+  4. When the dot is glowing red (backend offline), clicking it must automatically launch the local Uvicorn FastAPI backend server without requiring manual terminal commands.
+  5. On Next.js / React single-page app (SPA) route transitions (`history.pushState`), keyboard shortcuts must not break due to uninstantiated or stale closures.
+- **Root Causes Eliminated:**
+  1. **SPA Navigation Closure Stagnation:** In `floating_hud.js`, SPA route transitions called `setupStealthCodingKeyboardShortcuts()` with no arguments, fixing `codingHudInstance` as `undefined` inside captured closures and discarding subsequent hotkeys.
+  2. **Cursor-Following Drift:** `onDotPointerMove` and `positionWrapperAtCurrentLocation` positioned the dot near mouse events rather than strictly anchoring it to corner bounds.
+  3. **HTTPS Mixed Content:** Fetching `http://127.0.0.1:8000/health` directly from HTTPS origins (like `learning.ccbp.in`) triggered Chrome mixed-content blocks, causing the dot to incorrectly stay red.
+- **Surgical Implementations:**
+  1. **Dynamic Instance Resolution (`getActiveCodingHudInstance`):**
+     - Implemented dynamic HUD resolution in `extension/floating_hud.js` across `onStealthCodingKeyDown`, `onStealthCodingKeyUp`, `onStealthCodingPointerDown`, and `onGlobalKeyUp`.
+     - Standardized keyboard event detection (`e.key === "Shift"`, `e.code === "ShiftLeft" || "ShiftRight"`, `e.keyCode === 16 || e.which === 16`).
+  2. **Corner Anchoring & Instant Ctrl Reset:**
+     - Enforced `getCornerCoordinates(dotSize = 9, margin = 16)` calculating `winW - dotSize - 16` and `winH - dotSize - 16`.
+     - Wired `resetDotPositionToCorner(wrapper)` into `executeModifierAction("Control")` and `onStealthCodingKeyUp`.
+  3. **Native Messaging Backend Launcher (`com.quizzy.launcher`):**
+     - Created `native_host/launcher.py` and `install_native_host.bat` registering `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.launcher`.
+     - In `extension/background.js`, added `START_BACKEND` action delegating to `chrome.runtime.sendNativeMessage("com.quizzy.launcher", { action: "START_BACKEND" })`.
+     - Routed health checks through `background.js` proxying to bypass HTTPS mixed-content blocks.
+     - On red dot click, initiates launcher, transitions dot to pulsing orange (`glow-orange`), and begins Auto Mode as soon as online.
+- **Verification Suite:**
+  - **Full Pytest Suite:** **151/151 passing (100%)**.
+  - **Interaction Shortcuts Suite (`tests/test_hud_redirect_and_interaction_shortcuts.py`):** **6/6 passing (100%)**.
+  - **Native Launcher Suite (`tests/test_red_dot_backend_launcher.py`):** **4/4 passing (100%)**.
+  - **CCBP Coding Benchmark:** **15/15 passing (100%)**.
+  - **Offline Self-Test:** **100% passing**.
+
 ---
 
-> *This document represents the complete, verified state of the QuizZy project as of October 2026. All components have been verified via automated tests and runtime audits.*
+> *This document represents the complete, verified state of the QuizZy project as of November 2026. All components have been verified via automated tests and runtime audits.*
 
 

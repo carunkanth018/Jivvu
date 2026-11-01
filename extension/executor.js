@@ -1451,6 +1451,13 @@
       };
     }
 
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = targetEl;
+    }
+    if (targetEl && targetEl.setAttribute) {
+      try { targetEl.setAttribute("data-quizzy-selected", "true"); } catch (_) {}
+    }
+
     return {
       ok: true,
       success: true,
@@ -1467,6 +1474,13 @@
    */
   function isOptionChecked(optionEl) {
     if (!optionEl) return false;
+
+    if (typeof window !== "undefined" && window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ === optionEl) {
+      return true;
+    }
+    if (optionEl.getAttribute && optionEl.getAttribute("data-quizzy-selected") === "true") {
+      return true;
+    }
 
     // 1. Native input check
     const inputs = optionEl.querySelectorAll ? Array.from(optionEl.querySelectorAll("input[type='checkbox'], input[type='radio']")) : [];
@@ -3195,6 +3209,35 @@
 
     const submitBtn = allButtons.find(isSubmitCandidate);
     if (submitBtn) {
+      // MANDATORY PRE-SUBMIT SELECTION VERIFICATION GATE:
+      // The verified pipeline is: View question -> Solve it -> Select option -> Submit.
+      // If the question contains options, ensure at least one option is selected.
+      // Never click Submit if no option is selected!
+      const optionsOnPage = findOptionElements(null, null, doc);
+      if (optionsOnPage && optionsOnPage.length >= 2) {
+        const anyChecked = optionsOnPage.some(isOptionChecked);
+        const checkedInputs = doc.querySelectorAll("input[type='radio']:checked, input[type='checkbox']:checked");
+        const hasCheckedInput = checkedInputs && checkedInputs.length > 0;
+        const hasTrackedSelection = (typeof window !== "undefined" && window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ && doc.contains(window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__));
+
+        if (!anyChecked && !hasCheckedInput && !hasTrackedSelection) {
+          console.warn("[QuizZy Executor] Blocked SUBMIT: No option is currently selected on this question. Process is: View -> Solve -> Select -> Submit.");
+          return {
+            ok: false,
+            success: false,
+            selected: false,
+            error: "NO_OPTION_SELECTED: Cannot submit question because no option is selected."
+          };
+        }
+      }
+
+      const initialStem = (function() {
+        try {
+          const stemEl = doc.querySelector(".sc-question-stem, .question-stem, [class*='question-text'], p, h1, h2");
+          return stemEl ? cleanText(stemEl.innerText || stemEl.textContent || "") : "";
+        } catch (_) { return ""; }
+      })();
+
       const submitText = cleanText(submitBtn.innerText || submitBtn.textContent || submitBtn.value || "Submit");
       dispatchClick(submitBtn);
 
@@ -3214,13 +3257,35 @@
           break;
         }
 
-        // Check if "Please select an option" validation error appeared, OR after 360ms of waiting, SUBMIT hasn't transitioned
+        // Direct question advance detection: if the question text already changed, the page advanced immediately
+        if (initialStem) {
+          try {
+            const currentStemEl = doc.querySelector(".sc-question-stem, .question-stem, [class*='question-text'], p, h1, h2");
+            const currentStem = currentStemEl ? cleanText(currentStemEl.innerText || currentStemEl.textContent || "") : "";
+            if (currentStem && currentStem !== initialStem) {
+              if (typeof window !== "undefined") {
+                window.__QUIZZY_LAST_SELECTED_OPTION__ = null;
+                window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = null;
+              }
+              return {
+                ok: true,
+                success: true,
+                step: "submit_then_next",
+                action: "submit_then_next_clicked",
+                button_text: submitText,
+                waited_ms: waitedMs
+              };
+            }
+          } catch (_) {}
+        }
+
+        // Check if "Please select an option" validation error appeared
         const pageText = (doc.body ? doc.body.innerText || doc.body.textContent : doc.documentElement.textContent || "").toLowerCase();
         const hasSelectOptionError = /please\s*select\s*an?\s*(?:option|answer)|select\s*an?\s*option/i.test(pageText);
 
-        if (!retriedOptionSelect && (hasSelectOptionError || waitedMs >= 360)) {
+        if (!retriedOptionSelect && hasSelectOptionError) {
           const lastOpt = (typeof window !== "undefined") ? window.__QUIZZY_LAST_SELECTED_OPTION__ : null;
-          if (lastOpt && typeof triggerOptionSelect === "function") {
+          if (lastOpt && doc.contains(lastOpt) && typeof triggerOptionSelect === "function") {
             retriedOptionSelect = true;
             // Perform alternate deep click fallback on last selected option
             triggerOptionSelect(lastOpt);
@@ -3313,121 +3378,32 @@
   }
 
   /**
-   * Finds and clicks the Skip Question button on the host page.
-   * If a question takes longer than 5 seconds or cannot be answered, skipping advances
-   * to the next question so quiz progress is never blocked.
-   * Falls back to Next / Advance button if no explicit Skip button exists.
+   * Skipping questions operation has been completely removed/disabled.
+   * QuizZy never clicks host-page Skip buttons to prevent skipping questions.
    */
-  async function clickSkipButton(customSkipSelector) {
-    const doc = (typeof document !== "undefined") ? document : null;
-    if (!doc) return { success: false, ok: false, error: "No document" };
-
-    function isSkipCandidate(btn) {
-      if (!btn || btn.disabled || !isVisible(btn)) return false;
-      const t = cleanText(btn.innerText || btn.textContent || btn.value || btn.getAttribute("aria-label") || "").toLowerCase();
-      // Exclude accessibility navigation links
-      if (t.includes("skip to content") || t.includes("skip navigation") || t.includes("skip nav") || t.includes("skip to main")) {
-        return false;
-      }
-      if (/^(?:skip|skip\s*question|skip\s*this\s*question)\b/i.test(t)) {
-        return true;
-      }
-      if (btn.matches && (btn.matches("[data-quiz-skip]") || btn.matches(".btn-skip") || btn.matches(".skip-btn") || btn.matches(".quiz-skip") || btn.matches(".skip-button") || btn.matches("[data-action='skip']"))) {
-        return true;
-      }
-      return false;
-    }
-
-    if (customSkipSelector) {
-      try {
-        const el = doc.querySelector(customSkipSelector);
-        if (el && isVisible(el) && !el.disabled) {
-          const clicked = dispatchClick(el);
-          return {
-            ok: clicked,
-            success: clicked,
-            step: "skip_direct",
-            action: "skip_button_clicked",
-            button_text: cleanText(el.innerText || el.textContent || el.value || "Skip")
-          };
-        }
-      } catch (_) {}
-    }
-
-    const allButtons = Array.from(doc.querySelectorAll(
-      "button, a.btn, [role='button'], input[type='button'], input[type='submit']"
-    )).filter(isVisible);
-
-    const skipBtn = allButtons.find(isSkipCandidate);
-    if (skipBtn) {
-      const clicked = dispatchClick(skipBtn);
-      const btnText = cleanText(skipBtn.innerText || skipBtn.textContent || skipBtn.value || "Skip");
-      return {
-        ok: clicked,
-        success: clicked,
-        step: "skip_direct",
-        action: "skip_button_clicked",
-        button_text: btnText
-      };
-    }
-
-    // Heuristic fallback: check element before or inside disclaimer "If you skip..."
-    const allParagraphs = Array.from(doc.querySelectorAll("div, p, span")).filter(el => {
-      const txt = (el.innerText || el.textContent || "").toLowerCase();
-      return txt.includes("if you skip, you can attempt");
-    });
-    for (const p of allParagraphs) {
-      const prevBtn = p.previousElementSibling;
-      if (prevBtn && prevBtn.tagName && prevBtn.tagName.toLowerCase() === "button" && isVisible(prevBtn) && !prevBtn.disabled) {
-        const clicked = dispatchClick(prevBtn);
-        return {
-          ok: clicked,
-          success: clicked,
-          step: "skip_heuristic",
-          action: "skip_button_clicked",
-          button_text: cleanText(prevBtn.innerText || prevBtn.textContent || "Skip")
-        };
-      }
-    }
-
-    // Fallback: If no dedicated Skip button exists, attempt to click Next button to advance
-    const nextRes = await clickNextButton();
+  async function clickSkipButton(_customSkipSelector) {
     return {
-      ...nextRes,
-      step: nextRes.step || "skip_fallback_next",
-      fallback_to_next: true
+      success: false,
+      ok: false,
+      disabled: true,
+      error: "Skipping questions operation is completely disabled."
     };
   }
 
   /**
    * Resilient Question Advancement / Swiping:
-   * When QuizZy cannot analyze a screen or needs to advance:
-   * 1. Attempts dedicated Skip button (does not guess on unanalyzed questions).
-   * 2. Attempts Next / Submit / Advance question button.
-   * 3. Attempts Carousel / Slider next controls (.swiper-button-next, .slick-next, etc.).
-   * 4. Attempts Keyboard navigation (ArrowRight / PageDown).
-   * 5. Attempts Touch / Pointer horizontal swipe gesture on active card.
+   * When QuizZy needs to advance or swipe carousel:
+   * 1. Attempts Next / Submit / Advance question button.
+   * 2. Attempts Carousel / Slider next controls (.swiper-button-next, .slick-next, etc.).
+   * 3. Attempts Keyboard navigation (ArrowRight / PageDown).
+   * 4. Attempts Touch / Pointer horizontal swipe gesture on active card.
+   * (Never clicks Skip button)
    */
   async function swipeOrAdvanceQuestion(customSelector) {
     const doc = (typeof document !== "undefined") ? document : null;
     if (!doc) return { success: false, ok: false, error: "No document" };
 
-    // 1. Try dedicated Skip button first (preserves accuracy without blind guessing)
-    try {
-      const skipRes = await clickSkipButton(customSelector);
-      if (skipRes && (skipRes.success || skipRes.ok) && !skipRes.fallback_to_next) {
-        return {
-          success: true,
-          ok: true,
-          step: "skip_advance",
-          method: "skip",
-          action: "skip_clicked",
-          button_text: skipRes.button_text || "Skip"
-        };
-      }
-    } catch (_) {}
-
-    // 2. Try direct Next / Advance / Continue button
+    // 1. Try direct Next / Advance / Continue button
     try {
       const nextRes = await clickNextButton(customSelector);
       if (nextRes && (nextRes.success || nextRes.ok)) {
@@ -4638,7 +4614,14 @@
   }
 
   let isCodingAutomationRunning = false;
+  let isCodingAutomationAborted = false;
   let currentCodingAutomationState = "IDLE";
+
+  function abortCodingAutomation() {
+    isCodingAutomationAborted = true;
+    isCodingAutomationRunning = false;
+    currentCodingAutomationState = "ABORTED";
+  }
 
   function getCodingAutomationState() {
     return currentCodingAutomationState;
@@ -4785,10 +4768,12 @@
       return { success: false, error: "DUPLICATE_RUN_PREVENTED: Coding automation already in progress", status: "DUPLICATE_RUN_PREVENTED" };
     }
 
+    isCodingAutomationAborted = false;
     isCodingAutomationRunning = true;
     currentCodingAutomationState = "WRITING";
 
     try {
+      if (isCodingAutomationAborted) return { success: false, status: "ABORTED", error: "Automation stopped by user" };
       let attempt1Code = (payload && (payload.code || payload.answer || payload.selected_text)) || "";
 
       // Step 0: Ensure code payload is present before attempting write
@@ -4898,6 +4883,8 @@
         return { success: false, error: "Compile & Run button not found on page", status: "FAILED" };
       }
 
+      if (isCodingAutomationAborted) return { success: false, status: "ABORTED", error: "Automation stopped by user" };
+
       // Pre-Run DOM Epoch Snapshot for Attempt 1
       const preRunSig1 = capturePreRunSignature(doc);
 
@@ -4989,6 +4976,8 @@
             message: "Testcases verified successfully. Automated submission disabled on live third-party learning platform."
           };
         }
+
+        if (isCodingAutomationAborted) return { success: false, status: "ABORTED", error: "Automation stopped by user" };
 
         currentCodingAutomationState = "SUBMITTING";
         const submitBtn = findCodingSubmitButton(doc);
@@ -5175,6 +5164,7 @@
     triggerRunButton,
     extractCodingExecutionResult,
     autoCompileAndSubmitLoop,
+    abortCodingAutomation,
     isAuthorizedTestEnvironment,
     getCodingAutomationState,
     clickNextButton,

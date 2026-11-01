@@ -1,0 +1,15 @@
+{
+  "name": "com.quizzy.launcher",
+  "description": "QuizZy Local Backend Launcher Native Messaging Host",
+  "path": "C:\\Users\\jassh\\Jev\\native_host\\launcher.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://fmddjogdlehkodcjihmmmbdblhkmjhia/",
+    "chrome-extension://bjikoeoffpkkpnnibajmnggfbaaaoohb/",
+    "chrome-extension://ddkailojfnnmpcfbkdagbnkbkobmblci/",
+    "chrome-extension://gkigdfciojdildpclenimfhpdchegmdf/",
+    "chrome-extension://pphlghdmicddcjaedbgpfaldhnkiocbn/",
+    "chrome-extension://akcloplbnlpmdmdgmaamgpppnignejia/",
+    "chrome-extension://loggaoojnpbaholmopcagahakgbcjlpe/"
+  ]
+}

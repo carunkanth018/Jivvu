@@ -275,7 +275,14 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   if (btnRefreshHealth) {
-    btnRefreshHealth.addEventListener("click", checkBackendHealth);
+    btnRefreshHealth.addEventListener("click", () => {
+      checkBackendHealth();
+      if (statusText && statusText.textContent.toLowerCase().includes("offline")) {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "START_BACKEND" }, () => {});
+        }
+      }
+    });
   }
 
   // ==========================================================================
@@ -1226,12 +1233,11 @@ document.addEventListener("DOMContentLoaded", () => {
           setTimeout(() => performExtraction(onExtracted), 400);
           return;
         }
-        // Advance past unparseable screen and keep running (swipe or skip)!
+        // Extraction failed - halt auto mode to prevent skipping
         sameQuestionCount = 0;
-        setTelemetryState("RUNNING", `[Step ${currentStepNum}] Extraction retry limit reached. Advancing to next question...`);
-        chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, () => {
-          setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 800);
-        });
+        setTelemetryState("STOPPED_UNCERTAIN", `[Step ${currentStepNum}] Extraction retry limit reached. Stopped to prevent skipping.`);
+        showAlert(`Auto Mode Halted on Step ${currentStepNum}: Extraction retry limit reached.`, false);
+        stopAutoMode("Halted: Extraction retry limit reached");
         return;
       }
 
@@ -1240,12 +1246,11 @@ document.addEventListener("DOMContentLoaded", () => {
       if (previousQuestionSignature && currentSignature === previousQuestionSignature) {
         sameQuestionCount++;
         if (sameQuestionCount >= 2) {
-          // Page did not advance to a new question after Next click - swipe / advance to maintain auto flow!
-          setTelemetryState("RUNNING", `[Step ${currentStepNum}] Page did not advance. Swiping / advancing to maintain auto flow...`);
+          // Page did not advance to a new question after Next click - stop to prevent skipping
+          setTelemetryState("STOPPED_UNCERTAIN", `[Step ${currentStepNum}] Page did not advance. Stopped to prevent skipping.`);
+          showAlert(`Auto Mode Halted: Page did not advance.`, false);
           sameQuestionCount = 0;
-          chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, () => {
-            setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 800);
-          });
+          stopAutoMode("Halted: Page did not advance");
           return;
         }
       } else {
@@ -1261,30 +1266,25 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!isAutoRunning || killSwitchTriggered) return;
 
         if (!solution) {
-          setTelemetryState("RUNNING", `[Step ${currentStepNum}] Backend solver returned error. Swiping/advancing to next question...`);
-          chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, () => {
-            setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 800);
-          });
+          setTelemetryState("STOPPED_UNCERTAIN", `[Step ${currentStepNum}] Backend solver returned error. Stopped to prevent skipping.`);
+          showAlert(`Auto Mode Halted: Backend solver error.`, false);
+          stopAutoMode("Halted: Solver error");
           return;
         }
 
-        // GUARDRAIL 1: Halt or advance on uncertain consensus (DO NOT GUESS)
+        // GUARDRAIL 1: Halt on uncertain consensus (DO NOT GUESS)
         if (solution.status !== "ok" || solution.confidence_label === "uncertain") {
-          setTelemetryState("STOPPED_UNCERTAIN", `Model consensus uncertain (${solution.reason || "Disagreement"}). Swiping/skipping question to protect accuracy...`);
-          showAlert(`Auto Mode Skipping on Step ${currentStepNum}: Uncertain consensus. (Do not guess)`, false);
-          chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, () => {
-            setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 800);
-          });
+          setTelemetryState("STOPPED_UNCERTAIN", `HALTED: Uncertain consensus (${solution.reason || "Disagreement"}). Stopped to protect accuracy.`);
+          showAlert(`Auto Mode Halted on Step ${currentStepNum}: Uncertain consensus. (Do not guess)`, false);
+          stopAutoMode("Halted: Uncertain consensus");
           return;
         }
 
         // GUARDRAIL 2: Require HIGH_BOTH_AGREE if checked
         if (chkRequireHigh && chkRequireHigh.checked && solution.confidence_label !== "high") {
-          setTelemetryState("STOPPED_UNCERTAIN", `HALTED: Confidence is '${solution.confidence_label}' (${Math.round(solution.confidence_score * 100)}%). Swiping/skipping to protect accuracy.`);
-          showAlert(`Auto Mode Skipping: Question requires high consensus confidence.`, false);
-          chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }, () => {
-            setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 800);
-          });
+          setTelemetryState("STOPPED_UNCERTAIN", `HALTED: Confidence is '${solution.confidence_label}' (${Math.round(solution.confidence_score * 100)}%). Stopped to protect accuracy.`);
+          showAlert(`Auto Mode Halted: Question requires high consensus confidence.`, false);
+          stopAutoMode("Halted: High confidence required");
           return;
         }
 
@@ -1304,10 +1304,9 @@ document.addEventListener("DOMContentLoaded", () => {
         const isPureCoding = solution.q_type === "code" || (extracted && extracted.q_type === "code");
         const hasOptions = extracted && Array.isArray(extracted.options) && extracted.options.length >= 2;
         if (isPureCoding && !hasOptions) {
-          setTelemetryState("STOPPED_CONTENT_PROTECTED", `[Step ${currentStepNum}] Coding question detected. Auto Mode advancing to protect code content.`);
-          chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }, () => {
-            setTimeout(() => { if (isAutoRunning && !killSwitchTriggered) runNextAutoStep(); }, 600);
-          });
+          setTelemetryState("STOPPED_CONTENT_PROTECTED", `[Step ${currentStepNum}] Coding question detected in quiz mode. Stopped auto mode.`);
+          showAlert(`Auto Mode Halted: Coding question detected. Solve in Code mode or manually.`, false);
+          stopAutoMode("Halted: Coding question detected");
           return;
         }
 
@@ -1544,7 +1543,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (res && (res.success || res.ok)) {
           showAlert(`Advanced: ${res.button_text || res.method || "Next"}`, false);
         } else {
-          showAlert("Could not find next / skip / swipe element.", true);
+          showAlert("Could not find next / advance element.", true);
         }
         setTimeout(hideAlert, 2000);
       });
@@ -1864,7 +1863,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (btnApplyOnce) btnApplyOnce.click();
         } else if (cmd === "trigger_next") {
           chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" });
-        } else if (cmd === "trigger_skip" || cmd === "trigger_advance") {
+        } else if (cmd === "trigger_advance") {
           if (btnSwipeAdvance) btnSwipeAdvance.click();
           else chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" });
         } else if (cmd === "trigger_auto" || cmd === "trigger_auto_loop") {
@@ -1892,6 +1891,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", (e) => {
     if (!e) return;
     if (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight") {
+      if (shiftDownSp) return;
       shiftDownSp = true;
       shiftComboUsedSp = false;
     } else {
@@ -1904,17 +1904,22 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight") {
       shiftDownSp = false;
       if (!shiftComboUsedSp) {
-        if (shiftTimerSp) clearTimeout(shiftTimerSp);
-        shiftTimerSp = setTimeout(() => {
+        if (shiftTimerSp) {
+          clearTimeout(shiftTimerSp);
           shiftTimerSp = null;
-          if (isAutoRunning) {
-            triggerKillSwitch("Stopped via Shift hotkey");
-          } else {
-            if (btnStartAuto) btnStartAuto.click();
-          }
-        }, 220);
+        }
+        if (isAutoRunning) {
+          triggerKillSwitch("Stopped via Shift hotkey");
+        } else {
+          if (btnStartAuto) btnStartAuto.click();
+        }
       }
     }
+  });
+
+  window.addEventListener("blur", () => {
+    shiftDownSp = false;
+    shiftComboUsedSp = false;
   });
 
   // Run initializations

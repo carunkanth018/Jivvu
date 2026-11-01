@@ -9,31 +9,31 @@
   --bg-surface: #0E1B38;
   --bg-surface-elevated: #162B55;
   --bg-input: #081024;
-  
+
   --border-subtle: #1D356A;
   --border-focus: #3B82F6;
   --border-winner: #60A5FA;
-  
+
   --text-primary: #FFFFFF;
   --text-secondary: #BFDBFE;
   --text-muted: #93C5FD;
-  
+
   --brand-indigo: #2563EB;
   --brand-indigo-hover: #1D4ED8;
   --brand-gradient: linear-gradient(135deg, #1D4ED8 0%, #3B82F6 100%);
-  
+
   --accent-success: #60A5FA;
   --accent-warning: #93C5FD;
   --accent-error: #3B82F6;
   --accent-cyan: #38BDF8;
-  
+
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
-  
+
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  
+
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.45);
   --shadow-winner: 0 0 16px rgba(96, 165, 250, 0.4);
@@ -198,6 +198,7 @@ body {
   background-color: var(--accent-success);
   box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.25), 0 0 8px var(--accent-success);
 }
+
 .status-online {
   color: #FFFFFF;
   border-color: rgba(96, 165, 250, 0.45);
@@ -208,6 +209,7 @@ body {
   background-color: var(--accent-error);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
 }
+
 .status-offline {
   color: #BFDBFE;
   border-color: rgba(37, 99, 235, 0.45);
@@ -313,7 +315,8 @@ body {
 
 .btn-primary {
   width: 100%;
-  min-height: 44px; /* Touch target requirement */
+  min-height: 44px;
+  /* Touch target requirement */
   background: var(--brand-gradient);
   color: #FFFFFF;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
@@ -654,7 +657,9 @@ body {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Uncertain Banner */
@@ -1121,9 +1126,12 @@ body.popup-mode {
 }
 
 @keyframes pulse-panic {
-  0%, 100% {
+
+  0%,
+  100% {
     box-shadow: 0 0 12px rgba(37, 99, 235, 0.4);
   }
+
   50% {
     box-shadow: 0 0 22px rgba(37, 99, 235, 0.8);
   }
@@ -1188,7 +1196,7 @@ body.popup-mode {
   background: rgba(96, 165, 250, 0.25);
   color: #FFFFFF;
   border: 1px solid rgba(96, 165, 250, 0.5);
-  animation: pulse-telemetry 1.2s infinite;
+  animation: pulse-telemetry 1.2s infinite ease-in-out;
 }
 
 .badge-paused {
@@ -1228,8 +1236,16 @@ body.popup-mode {
 }
 
 @keyframes pulse-telemetry {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.25;
+    transform: scale(0.97);
+  }
 }
 
 /* ==========================================================================
@@ -1446,9 +1462,11 @@ body.popup-mode {
   .brand-title {
     font-size: 14px;
   }
+
   .brand-badge {
     display: none;
   }
+
   .status-pill {
     padding: 2px 6px;
     font-size: 10px;
@@ -1459,6 +1477,7 @@ body.popup-mode {
    Reduced Motion & Accessibility Overrides
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
+
   *,
   *::before,
   *::after {
@@ -1467,13 +1486,12 @@ body.popup-mode {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
   .status-online .status-dot {
     box-shadow: none !important;
   }
+
   .pulse {
     animation: none !important;
   }
 }
-
-
-

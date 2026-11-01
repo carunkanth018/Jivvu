@@ -1,25 +1,27 @@
 # QuizZy Project State
 
-## Current Milestone: White & Blue UI Theme, Mutual Exclusivity & Unified Shortcuts
-- **Status**: Production-Ready / All 142 Pytest Tests Passing (100% Pass Rate).
-- **Offline Benchmark**: 15/15 Coding Benchmark Passed (100%) & All Self-Tests Passed.
+## Current Milestone: Comprehensive Code Review & Robustness Hardening
+- **Status**: Production-Ready / All 151 Pytest Tests Passing (100% Pass Rate).
+- **Offline Benchmark**: 15/15 Coding Benchmark Passed (100%) & All Self-Tests Passed (100%).
 - **Core Architecture**: Chrome Manifest V3 Extension + FastAPI Python Backend (`127.0.0.1:8000`).
-- **Project Root**: `c:\Users\jassh\Projects\QuizZy\QuizZy`
+- **Backend Service**: Active with Hot-Reload on `http://127.0.0.1:8000` (verified via `/health` 200 OK).
+- **Native Host**: Registered at `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.launcher`.
+- **Project Root**: `c:\Users\jassh\Jev`
 - **Active Branch**: `main`
 
 ## Verified Upgrades & Bug Fixes
-1. **Strict White & Blue Palette (`extension/sidepanel.css`, `extension/floating_hud.js`, `extension/sidepanel.js`)**:
-   - Replaced all non-white/blue colors (greens, reds, ambers, purples) with a cohesive white and blue design system.
-   - Deep rich navy/slate backgrounds (`#060B19`, `#0E1B38`), royal/ice blue borders (`#1D356A`, `#3B82F6`, `#60A5FA`), pure white text (`#FFFFFF`), light ice-blue secondary text (`#BFDBFE`, `#93C5FD`), and royal blue primary buttons (`#2563EB`).
-2. **Mutual Exclusivity (`extension/background.js`, `extension/floating_hud.js`, `extension/sidepanel.js`)**:
-   - Only one interface open at a time: when the floating HUD opens, the side panel automatically closes (`CLOSE_SIDEPANEL_COMMAND` -> `window.close()`).
-   - When the side panel opens, the floating HUD is hidden across all tabs (`SIDEPANEL_STATE_CHANGED` -> `hide()`).
-3. **Global Shortcut Routing Everywhere (`extension/floating_hud.js`, `extension/sidepanel.js`)**:
-   - If side panel is open, all shortcut events on any tab (`Alt+S`, `Alt+A`, `Alt+N`, `Alt+K`/`Alt+W`, `Alt+O`, `Alt+M`, `Shift`, `Escape`) forward to side panel (`FORWARD_SHORTCUT_TO_SIDEPANEL`).
-   - If side panel is closed, shortcuts operate on the floating HUD. Pressing `Ctrl` when side panel is open closes side panel and reveals floating HUD.
-   - Solo `Shift` key listener inside side panel toggles Auto Mode for full functional parity with the floating HUD.
-4. **Deep Scanning, Swipe/Advance & Two-Stage Verification**:
-   - Progressive image/table/shadow-DOM extraction and `swipeOrAdvanceQuestion` fallback chain (skip -> next -> swiper -> touch gesture).
-   - Strict compute-first, format-second prompt architecture (`<verification_workspace>` + `<verified_json>`).
+1. **Backend Launch Callback Queue & Timeout Guard**:
+   - Implemented `pendingBackendCallbacks` FIFO queue in `handleTriggerStartBackend` to eliminate callback drops during concurrent or rapid triggers while the backend is starting up.
+   - Guarded polling timeout (`attempts >= maxAttempts`): safely resets `isAutoRunning`, halts active intervals, marks status as offline, and transitions dot to glow-red with informative tooltips.
+2. **Dual-Listener Idempotent Keyboard Capture**:
+   - Keyboard listeners in both stealth coding HUD and general HUD register on both `window` and `document` capture phases.
+   - Protected with `e.__quizzy_handled__` and `lastGlobalHandledEvent` deduplication to prevent double-execution across shadow boundaries and iframe focus traps.
+3. **8px Balanced Dot Geometry & Smooth Breathing Blinking**:
+   - Refined 8px dot footprint (`width: 8px; height: 8px;`) with 32px invisible grab zone.
+   - Continuous sinusoidal breathing pulse at `1.2s infinite ease-in-out` with smooth opacity transitions (`1.0` peak to `0.2` trough).
+4. **Shift Toggles Auto Mode & Ctrl Resets to Corner**:
+   - Single-press `Shift` unhides the dot at corner coordinates `{ x: 1895, y: 1055 }` and activates Auto Mode; pressing again cleanly stops it.
+   - Single-press `Ctrl` resets the dot to the corner and toggles visibility.
 5. **Comprehensive Verification**:
-   - 142/142 pytest tests passing across 21 test suites; 15/15 coding benchmarks passing.
+   - 151/151 pytest tests passing across all test suites (`tests/`).
+   - 15/15 coding benchmark problems passing (100%); all offline self-tests passing (100%).

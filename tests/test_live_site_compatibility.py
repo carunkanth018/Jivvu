@@ -1560,44 +1560,36 @@ async function main() {
     throw new Error("Test 15: Ctrl+Z combo triggered minimization!");
   }
 
-  // 6. Test double-tap Ctrl to hide / unhide QuizZy
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Control", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Control" });
+  // 6. Test single-press Ctrl to hide / unhide QuizZy
   hudSandbox.dispatchEvent({ type: "keydown", key: "Control", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Control" });
 
   if (!test15HudInstance.isHidden()) {
-    throw new Error("Test 15: Double-tap Ctrl did not hide QuizZy!");
+    throw new Error("Test 15: Single-press Ctrl did not hide QuizZy!");
   }
 
-  // Second double-tap Ctrl -> should unhide QuizZy
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Control", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Control" });
+  // Second press Ctrl -> should unhide QuizZy
   hudSandbox.dispatchEvent({ type: "keydown", key: "Control", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Control" });
 
   if (test15HudInstance.isHidden()) {
-    throw new Error("Test 15: Second double-tap Ctrl did not unhide QuizZy!");
+    throw new Error("Test 15: Second press Ctrl did not unhide QuizZy!");
   }
 
-  // 7. Test double-tap Shift (Fn fallback) to start / stop Auto Mode
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Shift", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Shift" });
+  // 7. Test single-press Shift to start / stop Auto Mode
   hudSandbox.dispatchEvent({ type: "keydown", key: "Shift", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Shift" });
 
   if (!autoBtn.classList.contains("running")) {
-    throw new Error("Test 15: Double-tap Shift did not start Auto Mode!");
+    throw new Error("Test 15: Single-press Shift did not start Auto Mode!");
   }
 
-  // Double-tap Shift again to stop Auto Mode
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Shift", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Shift" });
+  // Press Shift again to stop Auto Mode
   hudSandbox.dispatchEvent({ type: "keydown", key: "Shift", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Shift" });
 
   if (autoBtn.classList.contains("running")) {
-    throw new Error("Test 15: Second double-tap Shift did not stop Auto Mode!");
+    throw new Error("Test 15: Second press Shift did not stop Auto Mode!");
   }
 
   console.log("NODE_RUNTIME_TESTS_OK");

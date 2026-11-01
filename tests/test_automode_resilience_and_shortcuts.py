@@ -35,9 +35,9 @@ def test_floating_hud_shortcuts_and_message_listener():
     assert 'key === "s" || code === "KeyS"' in hud_code
     assert 'key === "a" || code === "KeyA"' in hud_code
     assert 'key === "n" || code === "KeyN"' in hud_code
-    assert 'key === "k" || code === "KeyK"' in hud_code
     assert 'key === "m" || code === "KeyM"' in hud_code
     assert 'key === "o" || code === "KeyO"' in hud_code
+    assert "skipCurrentQuestion" not in hud_code
 
     # 2. Modifier double-tap thresholds and keys
     assert "diff >= 0 && diff <= 650" in hud_code
@@ -52,37 +52,36 @@ def test_floating_hud_shortcuts_and_message_listener():
 
 
 def test_floating_hud_automode_error_resilience():
-    """Verify that floating_hud.js does NOT halt auto mode on selection errors, consensus or unverified orders."""
+    """Verify that floating_hud.js protects users by halting auto mode safely instead of skipping questions."""
     hud_code = (PROJECT_ROOT / "extension" / "floating_hud.js").read_text(encoding="utf-8")
 
     # Hiding HUD must not stop auto mode
     assert 'stopAutoMode("Stopped: HUD hidden");' not in hud_code
 
-    # Selection failure advances rather than halting
-    assert 'Selection error. Advancing to next question...' in hud_code
+    # Selection failure halts rather than skipping
+    assert 'Selection error. Stopped to prevent incorrect submission.' in hud_code
 
-    # Consensus uncertain in strict mode advances rather than halting
-    assert 'Consensus uncertain (strict mode). Advancing...' in hud_code
+    # Consensus uncertain in strict mode halts rather than skipping
+    assert 'Consensus uncertain in strict mode. Stopped to protect accuracy.' in hud_code
 
-    # Pure coding question advances rather than halting
-    assert 'Coding question detected. Advancing...' in hud_code
+    # Pure coding question halts rather than skipping
+    assert 'Coding question detected. Solve in Code mode or answer manually.' in hud_code
 
     # Step limit is raised
     assert 'autoStepCount >= 1000' in hud_code
 
 
 def test_sidepanel_automode_error_resilience():
-    """Verify that sidepanel.js does not halt on extraction or DOM selection failures."""
+    """Verify that sidepanel.js halts safely without skipping questions on unextracted or failed steps."""
     sp_code = (PROJECT_ROOT / "extension" / "sidepanel.js").read_text(encoding="utf-8")
 
-    # Extraction retry and advance
-    assert 'Extraction retry limit reached. Advancing to next question...' in sp_code
+    # Extraction retry limit reached halts rather than skipping
+    assert 'Extraction retry limit reached. Stopped to prevent skipping.' in sp_code
 
-    # Selection failure advances rather than halting
+    # Selection failure advances to maintain auto flow
     assert 'Advancing to next question to maintain auto flow...' in sp_code
 
     # Sidepanel shortcuts wired
-    assert 'Alt+S, Alt+A, Alt+N, Alt+K, Alt+O, Alt+M' in sp_code
     assert 'btnApplyOnce' in sp_code
 
 

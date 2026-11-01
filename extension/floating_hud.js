@@ -15,12 +15,12 @@
       isVisible: () => true,
       isHidden: () => false,
       isMinimized: () => false,
-      toggle: () => {},
-      show: () => {},
-      hide: () => {},
-      setMinimized: () => {},
-      setHidden: () => {},
-      destroy: () => {}
+      toggle: () => { },
+      show: () => { },
+      hide: () => { },
+      setMinimized: () => { },
+      setHidden: () => { },
+      destroy: () => { }
     };
     if (typeof module !== "undefined" && module.exports) {
       module.exports = mockInstance;
@@ -33,7 +33,7 @@
     if (typeof el.closest === "function") {
       try {
         return !!el.closest('.monaco-editor, .ace_editor, .cm-editor, .CodeMirror, [class*="monaco-editor"], [class*="ace_editor"]');
-      } catch (_) {}
+      } catch (_) { }
     }
     let cur = el;
     while (cur) {
@@ -50,7 +50,7 @@
     if (typeof window !== "undefined" && window.QuizZyExtractor && typeof window.QuizZyExtractor.hasQuizOptionsOutsideEditor === "function") {
       try {
         return window.QuizZyExtractor.hasQuizOptionsOutsideEditor(docRef);
-      } catch (_) {}
+      } catch (_) { }
     }
     const doc = docRef || (typeof document !== "undefined" ? document : null);
     if (!doc) return false;
@@ -80,7 +80,7 @@
           return true;
         }
       }
-    } catch (_) {}
+    } catch (_) { }
     return false;
   }
 
@@ -89,7 +89,7 @@
     try {
       const loc = window.location;
       const pathname = (loc && loc.pathname) ? loc.pathname : "";
-      
+
       // 1. Dedicated coding routes on CCBP (never mount in-page HUD on /question/*)
       if (pathname.includes("/question/") && !pathname.includes("/primitive-coding/practice/")) {
         return true;
@@ -117,7 +117,7 @@
           if (hasRunCode) return true;
         }
       }
-    } catch (_) {}
+    } catch (_) { }
     return false;
   }
 
@@ -135,7 +135,7 @@
             } else if (host.parentNode && typeof host.parentNode.removeChild === "function") {
               host.parentNode.removeChild(host);
             }
-          } catch (_) {}
+          } catch (_) { }
         }
         if (typeof doc.querySelectorAll === "function") {
           try {
@@ -145,23 +145,25 @@
                 try {
                   if (typeof sh.remove === "function") sh.remove();
                   else if (sh.parentNode && typeof sh.parentNode.removeChild === "function") sh.parentNode.removeChild(sh);
-                } catch (_) {}
+                } catch (_) { }
               }
             }
-          } catch (_) {}
+          } catch (_) { }
         }
       }
       if (typeof window !== "undefined") {
         if (window.__QUIZZY_HUD_INSTANCE__) {
-          try {
-            if (typeof window.__QUIZZY_HUD_INSTANCE__.destroy === "function") {
-              window.__QUIZZY_HUD_INSTANCE__.destroy();
-            }
-          } catch (_) {}
-          try { delete window.__QUIZZY_HUD_INSTANCE__; } catch (_) { window.__QUIZZY_HUD_INSTANCE__ = null; }
+          if (!window.__QUIZZY_HUD_INSTANCE__.isCodingMode) {
+            try {
+              if (typeof window.__QUIZZY_HUD_INSTANCE__.destroy === "function") {
+                window.__QUIZZY_HUD_INSTANCE__.destroy();
+              }
+            } catch (_) { }
+            try { delete window.__QUIZZY_HUD_INSTANCE__; } catch (_) { window.__QUIZZY_HUD_INSTANCE__ = null; }
+          }
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // Hook SPA navigation transitions without duplicate listeners or unnecessary polling
@@ -173,7 +175,8 @@
     const onNavigation = () => {
       if (isProctoredCodingPage()) {
         destroyInPageHudIfPresent();
-        setupStealthCodingKeyboardShortcuts();
+        const codingInst = getActiveCodingHudInstance();
+        setupStealthCodingKeyboardShortcuts(codingInst);
       } else {
         // Hide HUD on page redirect/navigation so it only appears when user presses Ctrl
         if (typeof hide === "function") {
@@ -194,7 +197,7 @@
         const origPush = history.pushState;
         history.pushState = function (...args) {
           const res = origPush.apply(this, args);
-          try { onNavigation(); } catch (_) {}
+          try { onNavigation(); } catch (_) { }
           return res;
         };
       }
@@ -202,7 +205,7 @@
         const origReplace = history.replaceState;
         history.replaceState = function (...args) {
           const res = origReplace.apply(this, args);
-          try { onNavigation(); } catch (_) {}
+          try { onNavigation(); } catch (_) { }
           return res;
         };
       }
@@ -211,20 +214,646 @@
 
   setupSpaNavigationListeners();
 
+  function getCornerCoordinates(dotSize = 9, margin = 16) {
+    const winW = (typeof window !== "undefined" && window.innerWidth) ? window.innerWidth : 1920;
+    const winH = (typeof window !== "undefined" && window.innerHeight) ? window.innerHeight : 1080;
+    const targetX = Math.max(3, winW - dotSize - margin);
+    const targetY = Math.max(3, winH - dotSize - margin);
+    return { x: targetX, y: targetY };
+  }
+
+  function resetDotPositionToCorner(wrapperEl) {
+    if (!wrapperEl || !wrapperEl.style) return;
+    const corner = getCornerCoordinates();
+    wrapperEl.style.left = `${corner.x}px`;
+    wrapperEl.style.top = `${corner.y}px`;
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ quizzy_dot_pos: { left: corner.x, top: corner.y } });
+    }
+  }
+
+  function positionWrapperAtCurrentLocation(wrapperEl) {
+    if (!wrapperEl || !wrapperEl.style) return;
+    resetDotPositionToCorner(wrapperEl);
+  }
+
+  const CODING_DOT_STYLES = `
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :host { all: initial; }
+    .quizzy-hud-wrapper { position: fixed; pointer-events: auto; user-select: none; z-index: 2147483647; }
+    .quizzy-hud-wrapper.hidden { display: none !important; }
+    .hud-mini-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #93C5FD; border: 1px solid #FFFFFF;
+      box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.6), 0 0 4px 1.5px rgba(96, 165, 250, 0.4);
+      cursor: grab; user-select: none; transition: transform 0.15s ease, box-shadow 0.25s ease, background-color 0.25s ease, border-color 0.25s ease;
+      display: block !important; visibility: visible !important; opacity: 1 !important; pointer-events: auto !important; position: relative; box-sizing: border-box;
+    }
+    .hud-mini-dot::before { content: ""; position: absolute; top: -12px; left: -12px; right: -12px; bottom: -12px; border-radius: 50%; cursor: grab; }
+    .hud-mini-dot:hover { transform: scale(1.35); }
+    .hud-mini-dot.dragging { cursor: grabbing; transform: scale(1.45); }
+    .hud-mini-dot.glow-red { background: #FCA5A5 !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 0 1px rgba(252, 165, 165, 0.65), 0 0 4px 1.5px rgba(248, 113, 113, 0.45), 0 0 7px 2px rgba(254, 202, 202, 0.3) !important; animation: hud-dot-pulse-red 1.2s infinite ease-in-out !important; }
+    @keyframes hud-dot-pulse-red { 0%, 100% { box-shadow: 0 0 0 1px rgba(252, 165, 165, 0.55), 0 0 3px 1px rgba(248, 113, 113, 0.4); transform: scale(1); } 50% { box-shadow: 0 0 0 1.5px rgba(252, 165, 165, 0.35), 0 0 6px 2px rgba(248, 113, 113, 0.55); transform: scale(1.15); } }
+    .hud-mini-dot.glow-green { background: #86EFAC !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 0 1px rgba(134, 239, 172, 0.65), 0 0 4px 1.5px rgba(74, 222, 128, 0.45), 0 0 7px 2px rgba(187, 247, 208, 0.3) !important; animation: hud-dot-pulse-green 1.2s infinite ease-in-out !important; }
+    @keyframes hud-dot-pulse-green {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1.15);
+        box-shadow: 0 0 0 1.5px rgba(134, 239, 172, 0.7), 0 0 5px 1.5px rgba(74, 222, 128, 0.5), 0 0 8px 2px rgba(187, 247, 208, 0.35);
+      }
+      50% {
+        opacity: 0.2;
+        transform: scale(0.85);
+        box-shadow: 0 0 0 0 rgba(134, 239, 172, 0);
+      }
+    }
+    .hud-mini-dot.glow-orange { background: #FDE68A !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 0 1px rgba(253, 230, 138, 0.65), 0 0 4px 1.5px rgba(251, 191, 36, 0.45), 0 0 7px 2px rgba(254, 243, 199, 0.3) !important; animation: hud-dot-pulse-orange 1.2s infinite ease-in-out !important; }
+    @keyframes hud-dot-pulse-orange {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1.15);
+        box-shadow: 0 0 0 1.5px rgba(253, 230, 138, 0.7), 0 0 5px 1.5px rgba(251, 191, 36, 0.5), 0 0 8px 2px rgba(254, 243, 199, 0.35);
+      }
+      50% {
+        opacity: 0.2;
+        transform: scale(0.85);
+        box-shadow: 0 0 0 0 rgba(253, 230, 138, 0);
+      }
+    }
+    .hud-mini-dot.glow-blue { background: #93C5FD !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.6), 0 0 4px 1.5px rgba(96, 165, 250, 0.4), 0 0 7px 2px rgba(191, 219, 254, 0.3) !important; animation: none !important; }
+    .hud-mini-dot.auto-running { animation: hud-dot-pulse-green 1.2s infinite ease-in-out !important; }
+  `;
+
+  let isStartingBackend = false;
+  let backendPollTimer = null;
+  const pendingBackendCallbacks = [];
+
+  function handleTriggerStartBackend(inst, dotEl, onOnlineCallback) {
+    if (typeof onOnlineCallback === "function") {
+      pendingBackendCallbacks.push(onOnlineCallback);
+    }
+
+    const checkFn = (inst && typeof inst.checkHealth === "function")
+      ? inst.checkHealth
+      : (typeof checkHealth === "function" ? checkHealth : null);
+
+    const fireOnline = () => {
+      if (backendPollTimer) {
+        clearInterval(backendPollTimer);
+        backendPollTimer = null;
+      }
+      isStartingBackend = false;
+      if (inst) inst.isBackendOnline = true;
+      if (typeof backendOnline !== "undefined") backendOnline = true;
+      if (inst && typeof inst.updateDotState === "function") inst.updateDotState();
+      else if (typeof updateDotState === "function") updateDotState();
+      while (pendingBackendCallbacks.length > 0) {
+        const cb = pendingBackendCallbacks.shift();
+        try { cb(); } catch (_) { }
+      }
+    };
+
+    if (isStartingBackend) {
+      if (checkFn) {
+        checkFn((isOnline) => {
+          if (isOnline) {
+            fireOnline();
+          }
+        });
+      }
+      return;
+    }
+    isStartingBackend = true;
+
+    const isAuto = Boolean((inst && inst.isAutoRunning) || (typeof isAutoRunning !== "undefined" && isAutoRunning));
+    if (!isAuto && dotEl && dotEl.classList) {
+      dotEl.classList.remove("glow-red", "glow-green", "glow-blue");
+      dotEl.classList.add("glow-orange");
+      dotEl.title = "QuizZy: Starting backend server... Please wait";
+    }
+
+    if (checkFn) {
+      checkFn((isOnline) => {
+        if (isOnline) {
+          fireOnline();
+        }
+      });
+    }
+
+    const onBackendStartMsg = (res) => {
+      console.log("[QuizZy] START_BACKEND response:", res);
+    };
+
+    if (typeof sendExtensionMessage === "function") {
+      sendExtensionMessage({ action: "START_BACKEND" }, onBackendStartMsg);
+    } else if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ action: "START_BACKEND" }, onBackendStartMsg);
+    }
+
+    let attempts = 0;
+    const maxAttempts = 24;
+    if (backendPollTimer) {
+      clearInterval(backendPollTimer);
+      backendPollTimer = null;
+    }
+    backendPollTimer = setInterval(() => {
+      attempts++;
+      if (checkFn) {
+        checkFn((isOnline) => {
+          if (isOnline) {
+            fireOnline();
+          } else if (attempts >= maxAttempts) {
+            if (backendPollTimer) {
+              clearInterval(backendPollTimer);
+              backendPollTimer = null;
+            }
+            isStartingBackend = false;
+            pendingBackendCallbacks.length = 0;
+            if (inst) {
+              if (inst.isAutoRunning) {
+                inst.isAutoRunning = false;
+                inst.autoErrorOccurred = true;
+                inst.autoErrorMessage = "Backend failed to start";
+                if (typeof inst.updateDotState === "function") inst.updateDotState();
+              }
+            }
+            if (typeof isAutoRunning !== "undefined" && isAutoRunning) {
+              if (typeof stopAutoMode === "function") {
+                stopAutoMode("Backend failed to start");
+              } else {
+                isAutoRunning = false;
+                autoErrorOccurred = true;
+                autoErrorMessage = "Backend failed to start";
+                if (typeof updateDotState === "function") updateDotState();
+              }
+            }
+            if (dotEl && dotEl.classList) {
+              dotEl.classList.remove("glow-orange", "glow-green", "auto-running");
+              dotEl.classList.add("glow-red");
+              dotEl.title = "QuizZy: Backend Offline (Click dot to start backend)";
+            }
+          }
+        });
+      } else {
+        if (backendPollTimer) {
+          clearInterval(backendPollTimer);
+          backendPollTimer = null;
+        }
+        isStartingBackend = false;
+        pendingBackendCallbacks.length = 0;
+      }
+    }, 350);
+  }
+
+  let globalStealthCodingInstance = null;
+
+  function createStealthCodingHudInstance() {
+    const inst = {
+      isCodingMode: true,
+      quizzyMode: "code",
+      getMode: () => "code",
+      setMode: () => { },
+      toggleMode: () => { },
+      isMock: true,
+      isProctoredCodingPage: () => true,
+      isVisible: () => Boolean(inst.wrapper && !inst.wrapper.classList.contains("hidden")),
+      isHidden: () => !inst.wrapper || inst.wrapper.classList.contains("hidden"),
+      isMinimized: () => false,
+      isAutoRunning: false,
+      isBackendOnline: false,
+      autoErrorOccurred: false,
+      autoErrorMessage: "",
+      toggle: () => {
+        if (inst.wrapper && inst.wrapper.classList) {
+          inst.wrapper.classList.toggle("hidden");
+          if (!inst.wrapper.classList.contains("hidden")) {
+            inst.updateDotState();
+          }
+        }
+      },
+      show: () => {
+        if (inst.wrapper && inst.wrapper.classList) {
+          inst.wrapper.classList.remove("hidden");
+        }
+        inst.updateDotState();
+      },
+      hide: () => {
+        if (inst.wrapper && inst.wrapper.classList) {
+          inst.wrapper.classList.add("hidden");
+        }
+      },
+      setMinimized: () => { },
+      setHidden: (val) => {
+        if (!inst.wrapper || !inst.wrapper.classList) return;
+        if (val) inst.wrapper.classList.add("hidden");
+        else {
+          inst.wrapper.classList.remove("hidden");
+          inst.updateDotState();
+        }
+      },
+      solve: () => {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { });
+        }
+      },
+      apply: () => {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { });
+        }
+      },
+      skip: () => { },
+      next: () => {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { });
+        }
+      },
+      startAuto: () => {
+        inst.isAutoRunning = true;
+        inst.autoErrorOccurred = false;
+        inst.autoErrorMessage = "";
+        if (inst.wrapper && inst.wrapper.classList) {
+          resetDotPositionToCorner(inst.wrapper);
+          inst.wrapper.classList.remove("hidden");
+        }
+        inst.updateDotState();
+
+        if (!inst.isBackendOnline) {
+          handleTriggerStartBackend(inst, inst.miniDot);
+        }
+
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, (res) => {
+            if (res && res.error) {
+              inst.autoErrorOccurred = true;
+              inst.autoErrorMessage = res.error;
+            } else {
+              inst.autoErrorOccurred = false;
+              inst.autoErrorMessage = "";
+            }
+            inst.isAutoRunning = false;
+            inst.updateDotState();
+          });
+        }
+      },
+      stopAuto: () => {
+        inst.isAutoRunning = false;
+        inst.updateDotState();
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "STOP_AUTO" }, () => { });
+        }
+      },
+      updateDotState: () => { },
+      checkHealth: (cb) => {
+        const sendFn = (typeof sendExtensionMessage === "function")
+          ? sendExtensionMessage
+          : ((typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.sendMessage === "function")
+            ? chrome.runtime.sendMessage.bind(chrome.runtime)
+            : null);
+        if (sendFn) {
+          try {
+            sendFn({ action: "CHECK_HEALTH" }, (res) => {
+              const ok = Boolean(res && res.success && res.data && (res.data.status === "ok" || res.data.status === "degraded"));
+              inst.isBackendOnline = ok;
+              inst.updateDotState();
+              if (cb) cb(ok, res);
+            });
+            return;
+          } catch (_) {}
+        }
+        if (typeof fetch === "function") {
+          fetch("http://127.0.0.1:8000/health", { method: "GET" })
+            .then(res => res.json())
+            .then(data => {
+              const ok = Boolean(data && data.status === "ok");
+              inst.isBackendOnline = ok;
+              inst.updateDotState();
+              if (cb) cb(ok);
+            })
+            .catch(() => {
+              inst.isBackendOnline = false;
+              inst.updateDotState();
+              if (cb) cb(false);
+            });
+        }
+      },
+      destroy: () => {
+        if (inst.__codingHealthInterval__) {
+          clearInterval(inst.__codingHealthInterval__);
+          inst.__codingHealthInterval__ = null;
+        }
+        const doc = (typeof document !== "undefined") ? document : null;
+        if (doc) {
+          const host = (typeof doc.getElementById === "function") ? doc.getElementById(HOST_ID) : null;
+          if (host && host.parentNode) {
+            host.parentNode.removeChild(host);
+          }
+        }
+        if (typeof window !== "undefined") {
+          try { delete window.__QUIZZY_HUD_INSTANCE__; } catch (_) { window.__QUIZZY_HUD_INSTANCE__ = null; }
+        }
+      }
+    };
+    return inst;
+  }
+
+  function getActiveCodingHudInstance() {
+    if (typeof window !== "undefined" && window.__QUIZZY_HUD_INSTANCE__ && window.__QUIZZY_HUD_INSTANCE__.isCodingMode) {
+      return window.__QUIZZY_HUD_INSTANCE__;
+    }
+    if (globalStealthCodingInstance && globalStealthCodingInstance.isCodingMode) {
+      if (typeof window !== "undefined") {
+        window.__QUIZZY_HUD_INSTANCE__ = globalStealthCodingInstance;
+      }
+      return globalStealthCodingInstance;
+    }
+    globalStealthCodingInstance = createStealthCodingHudInstance();
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_HUD_INSTANCE__ = globalStealthCodingInstance;
+    }
+    return globalStealthCodingInstance;
+  }
+
+  function mountCodingDotHud(inst) {
+    if (!inst) inst = getActiveCodingHudInstance();
+    if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
+    let host = (typeof document.getElementById === "function") ? document.getElementById(HOST_ID) : null;
+    if (!host) {
+      host = document.createElement("div");
+      host.id = HOST_ID;
+      host.setAttribute("data-quizzy-ignore", "true");
+      host.style.cssText = "all: initial; position: fixed; z-index: 2147483647; top: 0; left: 0; width: 0; height: 0; pointer-events: none; overflow: visible;";
+      if (document.documentElement && typeof document.documentElement.appendChild === "function") {
+        document.documentElement.appendChild(host);
+      } else if (document.body && typeof document.body.appendChild === "function") {
+        document.body.appendChild(host);
+      }
+    }
+    let shadow = host ? host.shadowRoot : null;
+    if (host && !shadow) {
+      try {
+        if (typeof host.attachShadow === "function") {
+          shadow = host.attachShadow({ mode: "open" });
+        } else {
+          shadow = host.shadowRoot || host;
+        }
+      } catch (_) {
+        shadow = host.shadowRoot || host;
+      }
+    }
+
+    let wrapper = (shadow && shadow.querySelector) ? (shadow.querySelector("#quizzy-hud-wrapper") || shadow.querySelector(".quizzy-hud-wrapper")) : null;
+    let miniDot = (shadow && shadow.querySelector) ? shadow.querySelector("#hud-mini-dot") : null;
+
+    if (!wrapper || !miniDot) {
+      if (shadow && typeof shadow.appendChild === "function") {
+        const styleEl = document.createElement("style");
+        styleEl.textContent = CODING_DOT_STYLES;
+        shadow.appendChild(styleEl);
+
+        wrapper = document.createElement("div");
+        wrapper.className = "quizzy-hud-wrapper";
+        wrapper.id = "quizzy-hud-wrapper";
+
+        miniDot = document.createElement("div");
+        miniDot.className = "hud-mini-dot glow-blue";
+        miniDot.id = "hud-mini-dot";
+        miniDot.setAttribute("role", "button");
+        miniDot.setAttribute("tabindex", "0");
+        miniDot.setAttribute("aria-label", "QuizZy Status Dot");
+        miniDot.title = "QuizZy: Initializing...";
+
+        wrapper.appendChild(miniDot);
+        shadow.appendChild(wrapper);
+      }
+
+      const dotSize = 8;
+      if (wrapper && wrapper.style) {
+        wrapper.style.position = "fixed";
+        positionWrapperAtCurrentLocation(wrapper);
+      }
+
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragStartY = 0;
+      let startLeft = 0;
+      let startTop = 0;
+      let dragDistance = 0;
+
+      const onDotPointerMove = (e) => {
+        if (!isDragging || !e || !wrapper) return;
+        const dx = (e.clientX || 0) - dragStartX;
+        const dy = (e.clientY || 0) - dragStartY;
+        dragDistance += Math.abs(dx) + Math.abs(dy);
+        const winW = (typeof window !== "undefined" ? window.innerWidth : 1920);
+        const winH = (typeof window !== "undefined" ? window.innerHeight : 1080);
+        const newX = Math.max(3, Math.min(startLeft + dx, winW - dotSize - 3));
+        const newY = Math.max(3, Math.min(startTop + dy, winH - dotSize - 3));
+        wrapper.style.left = `${newX}px`;
+        wrapper.style.top = `${newY}px`;
+      };
+
+      const onDotPointerUp = () => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (miniDot && miniDot.classList) miniDot.classList.remove("dragging");
+        if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+          window.removeEventListener("pointermove", onDotPointerMove, true);
+          window.removeEventListener("pointerup", onDotPointerUp, true);
+        }
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && wrapper) {
+          const rect = wrapper.getBoundingClientRect ? wrapper.getBoundingClientRect() : null;
+          if (rect) {
+            chrome.storage.local.set({ quizzy_dot_pos: { left: rect.left, top: rect.top } });
+          }
+        }
+      };
+
+      const onDotPointerDown = (e) => {
+        if (!e) return;
+        isDragging = true;
+        dragDistance = 0;
+        dragStartX = e.clientX || 0;
+        dragStartY = e.clientY || 0;
+        const rect = (wrapper && wrapper.getBoundingClientRect) ? wrapper.getBoundingClientRect() : { left: 0, top: 0 };
+        startLeft = rect.left;
+        startTop = rect.top;
+        if (miniDot && miniDot.classList) miniDot.classList.add("dragging");
+        if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+          window.addEventListener("pointermove", onDotPointerMove, { capture: true, passive: false });
+          window.addEventListener("pointerup", onDotPointerUp, { capture: true, passive: false });
+        }
+      };
+
+      if (miniDot && typeof miniDot.addEventListener === "function") {
+        miniDot.addEventListener("pointerdown", onDotPointerDown);
+        miniDot.addEventListener("click", () => {
+          if (dragDistance > 10) return;
+          const currentHud = getActiveCodingHudInstance();
+          if (currentHud) {
+            if (!currentHud.isBackendOnline) {
+              handleTriggerStartBackend(currentHud, miniDot, () => {
+                currentHud.startAuto();
+              });
+              return;
+            }
+            if (currentHud.isAutoRunning) {
+              currentHud.stopAuto();
+            } else {
+              currentHud.startAuto();
+            }
+          }
+        });
+      }
+    }
+
+    const updateCodingDotState = () => {
+      if (!miniDot || !miniDot.classList) return;
+      miniDot.classList.remove("glow-red", "glow-green", "glow-orange", "glow-blue", "auto-running");
+      const currentInst = getActiveCodingHudInstance();
+      if (currentInst) {
+        if (currentInst.autoErrorOccurred) {
+          miniDot.classList.add("glow-orange");
+          miniDot.title = `QuizZy Auto Mode Error: ${currentInst.autoErrorMessage || "Error occurred"}`;
+        } else if (currentInst.isAutoRunning) {
+          miniDot.classList.add("glow-green", "auto-running");
+          miniDot.title = "QuizZy Coding Auto Mode: Running (Press Shift or click dot to stop)";
+        } else if (!currentInst.isBackendOnline) {
+          miniDot.classList.add("glow-red");
+          miniDot.title = "QuizZy: Backend Offline (Click dot to start backend)";
+        } else {
+          miniDot.classList.add("glow-blue");
+          miniDot.title = "QuizZy: Ready (Press Shift to toggle Auto Mode)";
+        }
+      }
+    };
+
+    const checkCodingHealth = (cb) => {
+      const sendFn = (typeof sendExtensionMessage === "function")
+        ? sendExtensionMessage
+        : ((typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.sendMessage === "function")
+          ? chrome.runtime.sendMessage.bind(chrome.runtime)
+          : null);
+
+      if (sendFn) {
+        try {
+          sendFn({ action: "CHECK_HEALTH" }, (res) => {
+            const ok = Boolean(res && res.success && res.data && (res.data.status === "ok" || res.data.status === "degraded"));
+            const currentInst = getActiveCodingHudInstance();
+            if (currentInst) currentInst.isBackendOnline = ok;
+            updateCodingDotState();
+            if (cb) cb(ok, res);
+          });
+          return;
+        } catch (_) {}
+      }
+
+      if (typeof fetch === "function") {
+        fetch("http://127.0.0.1:8000/health", { method: "GET" })
+          .then(res => res.json())
+          .then(data => {
+            const ok = Boolean(data && data.status === "ok");
+            const currentInst = getActiveCodingHudInstance();
+            if (currentInst) currentInst.isBackendOnline = ok;
+            updateCodingDotState();
+            if (cb) cb(ok);
+          })
+          .catch(() => {
+            const currentInst = getActiveCodingHudInstance();
+            if (currentInst) currentInst.isBackendOnline = false;
+            updateCodingDotState();
+            if (cb) cb(false);
+          });
+      }
+    };
+
+    if (inst) {
+      inst.host = host;
+      inst.shadow = shadow;
+      inst.wrapper = wrapper;
+      inst.miniDot = miniDot;
+      inst.updateDotState = updateCodingDotState;
+      inst.checkHealth = checkCodingHealth;
+      inst.isVisible = () => wrapper && !wrapper.classList.contains("hidden");
+      inst.isHidden = () => !wrapper || wrapper.classList.contains("hidden");
+      inst.show = () => {
+        if (wrapper && wrapper.classList) wrapper.classList.remove("hidden");
+        updateCodingDotState();
+      };
+      inst.hide = () => {
+        if (wrapper && wrapper.classList) wrapper.classList.add("hidden");
+      };
+      inst.toggle = () => {
+        if (wrapper && wrapper.classList) {
+          wrapper.classList.toggle("hidden");
+          if (!wrapper.classList.contains("hidden")) updateCodingDotState();
+        }
+      };
+      inst.setHidden = (val) => {
+        if (!wrapper || !wrapper.classList) return;
+        if (val) wrapper.classList.add("hidden");
+        else {
+          wrapper.classList.remove("hidden");
+          updateCodingDotState();
+        }
+      };
+    }
+
+    checkCodingHealth();
+    if (inst && !inst.__codingHealthInterval__) {
+      inst.__codingHealthInterval__ = setInterval(() => {
+        checkCodingHealth();
+      }, 3000);
+      if (inst.__codingHealthInterval__ && typeof inst.__codingHealthInterval__.unref === "function") {
+        inst.__codingHealthInterval__.unref();
+      }
+    }
+    updateCodingDotState();
+    return { host, shadow, wrapper, miniDot };
+  }
+
   // Stealth keyboard shortcuts: active on window with ZERO DOM footprint
-  function setupStealthCodingKeyboardShortcuts() {
+  function setupStealthCodingKeyboardShortcuts(codingHudInstance) {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
     if (window.__QUIZZY_KEYBOARD_INITIALIZED__) return;
     window.__QUIZZY_KEYBOARD_INITIALIZED__ = true;
 
+    let ctrlDown = false;
+    let ctrlComboUsed = false;
+    let shiftDown = false;
+    let shiftComboUsed = false;
+
     const onStealthCodingKeyDown = function (e) {
       if (!e) return;
+      const hud = getActiveCodingHudInstance();
       if (e.key === "Escape" || e.key === "Esc") {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "KILL_SWITCH_TRIGGERED", reason: "Escape hotkey" }, () => {});
+          chrome.runtime.sendMessage({ action: "KILL_SWITCH_TRIGGERED", reason: "Escape hotkey" }, () => { });
+        }
+        if (hud && hud.isAutoRunning) {
+          hud.stopAuto();
         }
         return;
       }
+
+      if (e.repeat) return;
+
+      const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
+      const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
+
+      if (isControl) {
+        if (ctrlDown) return;
+        ctrlDown = true;
+        ctrlComboUsed = false;
+        return;
+      } else if (isShift) {
+        if (shiftDown) return;
+        shiftDown = true;
+        shiftComboUsed = false;
+        return;
+      } else {
+        if (ctrlDown) ctrlComboUsed = true;
+        if (shiftDown) shiftComboUsed = true;
+      }
+
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const key = (e.key || "").toLowerCase();
       const code = e.code || "";
@@ -234,7 +863,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => {});
+          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { });
         }
         return;
       }
@@ -242,7 +871,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => {});
+          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { });
         }
         return;
       }
@@ -250,7 +879,7 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => {});
+          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { });
         }
         return;
       }
@@ -258,18 +887,105 @@
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "OPEN_POPUP_HUD", force: true }, () => {});
+          chrome.runtime.sendMessage({ action: "OPEN_POPUP_HUD", force: true }, () => { });
         }
         return;
       }
     };
 
-    if (typeof window !== "undefined") {
+    let lastStealthHandledEvent = null;
+
+    const onStealthCodingKeyUp = function (e) {
+      if (!e || e === lastStealthHandledEvent || e.__quizzy_handled__) return;
+      const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
+      const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
+
+      const hud = getActiveCodingHudInstance();
+
+      if (isControl) {
+        ctrlDown = false;
+        if (!ctrlComboUsed) {
+          lastStealthHandledEvent = e;
+          e.__quizzy_handled__ = true;
+
+          const wasMounted = Boolean(hud && hud.wrapper);
+          mountCodingDotHud(hud);
+          if (hud) {
+            resetDotPositionToCorner(hud.wrapper);
+            if (!wasMounted || hud.isHidden()) {
+              hud.show();
+            } else {
+              hud.hide();
+            }
+          }
+        }
+      } else if (isShift) {
+        shiftDown = false;
+        if (!shiftComboUsed) {
+          lastStealthHandledEvent = e;
+          e.__quizzy_handled__ = true;
+
+          mountCodingDotHud(hud);
+          if (hud) {
+            if (hud.isAutoRunning) {
+              hud.stopAuto();
+            } else {
+              resetDotPositionToCorner(hud.wrapper);
+              hud.show();
+              hud.startAuto();
+            }
+          }
+        }
+        shiftComboUsed = false;
+      }
+    };
+
+    const onStealthCodingPointerDown = function (e) {
+      if (!e || e === lastStealthHandledEvent || e.__quizzy_handled__) return;
+
+      const hud = getActiveCodingHudInstance();
+      const isInsideHud = Boolean(e.target && (
+        (hud && hud.miniDot && (e.target === hud.miniDot || (hud.miniDot.contains && hud.miniDot.contains(e.target)))) ||
+        (hud && hud.wrapper && (e.target === hud.wrapper || (hud.wrapper.contains && hud.wrapper.contains(e.target))))
+      ));
+      if (isInsideHud) return;
+
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+        ctrlComboUsed = true;
+        lastStealthHandledEvent = e;
+        e.__quizzy_handled__ = true;
+
+        const wasMounted = Boolean(hud && hud.wrapper);
+        mountCodingDotHud(hud);
+        if (hud) {
+          resetDotPositionToCorner(hud.wrapper);
+          if (!wasMounted || hud.isHidden()) {
+            hud.show();
+          } else {
+            hud.hide();
+          }
+        }
+      }
+    };
+
+    const onStealthCodingBlur = function () {
+      ctrlDown = false;
+      ctrlComboUsed = false;
+      shiftDown = false;
+      shiftComboUsed = false;
+    };
+
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       window.__QUIZZY_STEALTH_SHORTCUT_HANDLER__ = onStealthCodingKeyDown;
-    }
-    window.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
-    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      window.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
+      window.addEventListener("keyup", onStealthCodingKeyUp, { capture: true, passive: false });
+      window.addEventListener("pointerdown", onStealthCodingPointerDown, { capture: true, passive: true });
+      window.addEventListener("blur", onStealthCodingBlur);
+    } else if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
       document.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
+      document.addEventListener("keyup", onStealthCodingKeyUp, { capture: true, passive: false });
+      document.addEventListener("pointerdown", onStealthCodingPointerDown, { capture: true, passive: true });
+      document.addEventListener("blur", onStealthCodingBlur);
     }
   }
 
@@ -277,55 +993,20 @@
   // Aborts host/shadow DOM creation on pure coding routes.
   // Actively unmounts any leaked in-page HUD if user navigated via SPA.
   if (isProctoredCodingPage()) {
+    if (typeof window !== "undefined" && window.__QUIZZY_HUD_INSTANCE__ && window.__QUIZZY_HUD_INSTANCE__.isCodingMode) {
+      const existing = window.__QUIZZY_HUD_INSTANCE__;
+      return {
+        success: true,
+        mounted: Boolean(existing.wrapper),
+        codingMode: true,
+        quizzyMode: "code",
+        instance: existing
+      };
+    }
     destroyInPageHudIfPresent();
-    setupStealthCodingKeyboardShortcuts();
 
-    const codingHudInstance = {
-      isCodingMode: true,
-      quizzyMode: "code",
-      getMode: () => "code",
-      setMode: () => {},
-      toggleMode: () => {},
-      isMock: true,
-      isProctoredCodingPage: () => true,
-      isVisible: () => false,
-      isHidden: () => true,
-      isMinimized: () => false,
-      toggle: () => {},
-      show: () => {},
-      hide: () => {},
-      setMinimized: () => {},
-      setHidden: () => {},
-      solve: () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => {});
-        }
-      },
-      apply: () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => {});
-        }
-      },
-      skip: () => {},
-      next: () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => {});
-        }
-      },
-      startAuto: () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => {});
-        }
-      },
-      stopAuto: () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "STOP_AUTO" }, () => {});
-        }
-      },
-      destroy: () => {
-        destroyInPageHudIfPresent();
-      }
-    };
+    const codingHudInstance = getActiveCodingHudInstance();
+    setupStealthCodingKeyboardShortcuts(codingHudInstance);
 
     window.__QUIZZY_HUD_INSTANCE__ = codingHudInstance;
     if (typeof module !== "undefined" && module.exports) {
@@ -333,8 +1014,9 @@
     }
     return {
       success: true,
-      mounted: false,
+      mounted: Boolean(codingHudInstance.wrapper),
       codingMode: true,
+      quizzyMode: "code",
       instance: codingHudInstance
     };
   }
@@ -355,16 +1037,16 @@
     const fallbackInstance = {
       isMock: true,
       getMode: () => "mcq",
-      toggleMode: () => {},
+      toggleMode: () => { },
       isVisible: () => false,
       isHidden: () => true,
       isMinimized: () => false,
-      toggle: () => {},
-      show: () => {},
-      hide: () => {},
-      setMinimized: () => {},
-      setHidden: () => {},
-      destroy: () => {}
+      toggle: () => { },
+      show: () => { },
+      hide: () => { },
+      setMinimized: () => { },
+      setHidden: () => { },
+      destroy: () => { }
     };
     if (typeof module !== "undefined" && module.exports) {
       module.exports = fallbackInstance;
@@ -378,7 +1060,7 @@
     host.id = HOST_ID;
     host.setAttribute("data-quizzy-ignore", "true");
     host.style.cssText = "all: initial; position: fixed; z-index: 2147483647; top: 0; left: 0; width: 0; height: 0; pointer-events: none; overflow: visible;";
-    
+
     if (document.documentElement && typeof document.documentElement.appendChild === "function") {
       document.documentElement.appendChild(host);
     } else if (document.body && typeof document.body.appendChild === "function") {
@@ -429,41 +1111,37 @@
       display: none !important;
     }
 
-    /* Compact Rectangular Bar (~36px height) */
-    .hud-bar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      height: 36px;
-      min-width: 260px;
-      max-width: 440px;
-      padding: 4px 8px;
-      background: #0B1530;
-      border: 1px solid #1D356A;
-      border-radius: 6px;
-      color: #FFFFFF;
-      cursor: grab;
-      position: relative;
-      box-shadow: 0 2px 8px rgba(6, 11, 25, 0.45);
+    /* Compact Rectangular Bar: Permanently Hidden (Dot remains visible) */
+    .hud-bar,
+    .hud-bar.hidden,
+    .hud-bar:not(.hidden) {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+      max-height: 0 !important;
+      max-width: 0 !important;
+      overflow: hidden !important;
+      position: absolute !important;
+      left: -9999px !important;
     }
 
-    .hud-bar.dragging {
-      cursor: grabbing;
-      box-shadow: 0 4px 14px rgba(6, 11, 25, 0.6);
-    }
-
-    /* Very Small Movable White Dot (9x9px) with Blue Border */
-    .hud-mini-dot {
-      width: 9px;
-      height: 9px;
+    /* Movable Glow Dot (Always Visible, Tiny, Light Color, Follows Cursor) */
+    .hud-mini-dot,
+    .hud-mini-dot.hidden {
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
       background: #FFFFFF;
-      border: 1.5px solid #1D4ED8;
-      box-shadow: 0 1px 4px rgba(6, 11, 25, 0.4);
+      border: 1px solid #60A5FA;
+      box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.6), 0 0 4px 1.5px rgba(96, 165, 250, 0.4);
       cursor: grab;
       user-select: none;
-      transition: transform 0.12s ease;
-      display: block;
+      transition: transform 0.15s ease, box-shadow 0.25s ease, background-color 0.25s ease, border-color 0.25s ease;
+      display: block !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
       position: relative;
       box-sizing: border-box;
     }
@@ -472,10 +1150,10 @@
     .hud-mini-dot::before {
       content: "";
       position: absolute;
-      top: -9px;
-      left: -9px;
-      right: -9px;
-      bottom: -9px;
+      top: -12px;
+      left: -12px;
+      right: -12px;
+      bottom: -12px;
       border-radius: 50%;
       cursor: grab;
     }
@@ -486,18 +1164,80 @@
 
     .hud-mini-dot.dragging {
       cursor: grabbing;
-      transform: scale(1.5);
+      transform: scale(1.45);
+    }
+
+    /* 1. Red Glow: Backend is not running (Light soft red) */
+    .hud-mini-dot.glow-red {
+      background: #FCA5A5 !important;
+      border: 1px solid #FFFFFF !important;
+      box-shadow: 0 0 0 1px rgba(252, 165, 165, 0.65), 0 0 4px 1.5px rgba(248, 113, 113, 0.45), 0 0 7px 2px rgba(254, 202, 202, 0.3) !important;
+      animation: hud-dot-pulse-red 1.2s infinite ease-in-out !important;
+    }
+
+    @keyframes hud-dot-pulse-red {
+      0%, 100% {
+        box-shadow: 0 0 0 1px rgba(252, 165, 165, 0.55), 0 0 3px 1px rgba(248, 113, 113, 0.4);
+        transform: scale(1);
+      }
+      50% {
+        box-shadow: 0 0 0 1.5px rgba(252, 165, 165, 0.35), 0 0 6px 2px rgba(248, 113, 113, 0.55);
+        transform: scale(1.15);
+      }
+    }
+
+    /* 2. Green Glow: Working in auto mode with no errors (Light soft green blink) */
+    .hud-mini-dot.glow-green {
+      background: #86EFAC !important;
+      border: 1px solid #FFFFFF !important;
+      box-shadow: 0 0 0 1px rgba(134, 239, 172, 0.65), 0 0 4px 1.5px rgba(74, 222, 128, 0.45), 0 0 7px 2px rgba(187, 247, 208, 0.3) !important;
+      animation: hud-dot-pulse-green 1.2s infinite ease-in-out !important;
+    }
+
+    @keyframes hud-dot-pulse-green {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1.15);
+        box-shadow: 0 0 0 1.5px rgba(134, 239, 172, 0.7), 0 0 5px 1.5px rgba(74, 222, 128, 0.5), 0 0 8px 2px rgba(187, 247, 208, 0.35);
+      }
+      50% {
+        opacity: 0.2;
+        transform: scale(0.85);
+        box-shadow: 0 0 0 0 rgba(134, 239, 172, 0);
+      }
+    }
+
+    /* 3. Orange Glow: Working in auto mode but errors occur (Light soft orange) */
+    .hud-mini-dot.glow-orange {
+      background: #FDE68A !important;
+      border: 1px solid #FFFFFF !important;
+      box-shadow: 0 0 0 1px rgba(253, 230, 138, 0.65), 0 0 4px 1.5px rgba(251, 191, 36, 0.45), 0 0 7px 2px rgba(254, 243, 199, 0.3) !important;
+      animation: hud-dot-pulse-orange 1.2s infinite ease-in-out !important;
+    }
+
+    @keyframes hud-dot-pulse-orange {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1.15);
+        box-shadow: 0 0 0 1.5px rgba(253, 230, 138, 0.7), 0 0 5px 1.5px rgba(251, 191, 36, 0.5), 0 0 8px 2px rgba(254, 243, 199, 0.35);
+      }
+      50% {
+        opacity: 0.2;
+        transform: scale(0.85);
+        box-shadow: 0 0 0 0 rgba(253, 230, 138, 0);
+      }
+    }
+
+    /* 4. Blue Glow: Backend connected & idle / ready (Light white with soft sky-blue glow) */
+    .hud-mini-dot.glow-blue {
+      background: #FFFFFF !important;
+      border: 1px solid #60A5FA !important;
+      box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.6), 0 0 4px 1.5px rgba(96, 165, 250, 0.4), 0 0 7px 2px rgba(191, 219, 254, 0.3) !important;
+      animation: none !important;
     }
 
     .hud-mini-dot.auto-running {
-      border-color: #60A5FA;
-      box-shadow: 0 0 6px rgba(96, 165, 250, 0.85);
-      animation: hud-dot-pulse 1s infinite alternate;
-    }
-
-    @keyframes hud-dot-pulse {
-      0% { transform: scale(1); }
-      100% { transform: scale(1.4); }
+      animation: hud-dot-pulse-green 1.2s infinite ease-in-out !important;
     }
 
     /* Left Status Dot & Mode Pill */
@@ -778,27 +1518,19 @@
       color: #FFFFFF;
     }
 
-    /* More Popover Drawer */
-    .hud-popover {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      background: #0B1530;
-      border: 1px solid #1D356A;
-      border-radius: 6px;
-      padding: 8px 10px;
-      margin-top: 4px;
-      box-shadow: 0 6px 16px rgba(6, 11, 25, 0.5);
-      animation: hud-fade-in 120ms ease-out;
-    }
-
-    @keyframes hud-fade-in {
-      from { opacity: 0; transform: translateY(-3px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .hud-popover.hidden {
+    /* More Popover Drawer: Permanently Hidden */
+    .hud-popover,
+    .hud-popover.hidden,
+    .hud-popover:not(.hidden) {
       display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+      max-height: 0 !important;
+      max-width: 0 !important;
+      overflow: hidden !important;
+      position: absolute !important;
+      left: -9999px !important;
     }
 
     .hud-popover-row {
@@ -854,26 +1586,6 @@
       background: #2563EB;
       border-color: #60A5FA;
       color: #FFFFFF;
-    }
-
-    .hud-btn-skip-manual {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      height: 24px;
-      padding: 0 8px;
-      border-radius: 4px;
-      background: rgba(37, 99, 235, 0.15);
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      color: #BFDBFE;
-      font-size: 11px;
-      font-weight: 600;
-      cursor: pointer;
-      flex-shrink: 0;
-    }
-
-    .hud-btn-skip-manual:hover {
-      background: rgba(37, 99, 235, 0.25);
     }
 
     .hud-svg {
@@ -952,7 +1664,7 @@
         </button>
 
         <!-- Auto Mode (Toggle) -->
-        <button class="hud-btn hud-btn-auto" id="hud-btn-auto" title="Auto Mode (Double-tap Fn or Shift)">
+        <button class="hud-btn hud-btn-auto" id="hud-btn-auto" title="Auto Mode (Press Shift or click dot to toggle)">
           <svg class="hud-svg" id="hud-auto-icon" viewBox="0 0 24 24">
             <polygon points="5 3 19 12 5 21 5 3" fill="currentColor"></polygon>
           </svg>
@@ -982,13 +1694,6 @@
       <div class="hud-popover-row">
         <div class="hud-reason-text" id="hud-reason-text">No reasoning available yet. Click Solve to get explanations.</div>
         <div style="display: flex; gap: 6px; flex-shrink: 0;">
-          <button class="hud-btn-skip-manual" id="hud-btn-skip" title="Skip this question immediately (Alt+K)">
-            <svg class="hud-svg" viewBox="0 0 24 24" style="width: 12px; height: 12px;">
-              <polygon points="5 4 15 12 5 20 5 4" fill="currentColor"></polygon>
-              <line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"></line>
-            </svg>
-            <span>Skip</span>
-          </button>
           <button class="hud-btn-flag" id="hud-btn-flag" title="Flag as wrong and evict from cache">
             <svg class="hud-svg" viewBox="0 0 24 24" style="width: 12px; height: 12px;">
               <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
@@ -1032,7 +1737,6 @@
   const popover = getShadowEl("hud-popover");
   const reasonText = getShadowEl("hud-reason-text");
   const btnFlag = getShadowEl("hud-btn-flag");
-  const btnSkip = getShadowEl("hud-btn-skip");
   const chkStrict = getShadowEl("hud-chk-strict");
   const modePill = getShadowEl("hud-mode-pill");
   const modeMcq = getShadowEl("hud-mode-mcq");
@@ -1052,6 +1756,37 @@
   let latestSolution = null;
   let latestExtracted = null;
   let isSidePanelOpen = false;
+  let backendOnline = false;
+  let autoErrorOccurred = false;
+  let autoErrorMessage = "";
+
+  function updateDotState() {
+    if (!miniDot) return;
+    if (miniDot.classList) {
+      miniDot.classList.remove("glow-red", "glow-green", "glow-orange", "glow-blue", "auto-running");
+    }
+
+    if (autoErrorOccurred) {
+      // 3. If working in auto mode but errors occur, it should glow orange
+      if (miniDot.classList) miniDot.classList.add("glow-orange");
+      miniDot.title = `QuizZy Auto Mode Error: ${autoErrorMessage || "Error occurred"} (Click dot to restart)`;
+    } else if (isAutoRunning) {
+      // 2. When working in auto mode with no errors, it should glow green
+      if (miniDot.classList) {
+        miniDot.classList.add("glow-green");
+        miniDot.classList.add("auto-running");
+      }
+      miniDot.title = "QuizZy Auto Mode: Running (Press Shift or click dot to stop)";
+    } else if (!backendOnline) {
+      // 1. If the backend is not running, the dot should glow red
+      if (miniDot.classList) miniDot.classList.add("glow-red");
+      miniDot.title = "QuizZy: Backend Offline (Click dot to start backend)";
+    } else {
+      // Default: Connected & Idle
+      if (miniDot.classList) miniDot.classList.add("glow-blue");
+      miniDot.title = "QuizZy: Connected & Ready (Press Shift to toggle Auto Mode)";
+    }
+  }
 
   // Query background for side panel presence on startup (mutual exclusivity)
   sendExtensionMessage({ action: "GET_SIDEPANEL_STATE" }, (res) => {
@@ -1080,7 +1815,7 @@
           return "code";
         }
       }
-    } catch (_) {}
+    } catch (_) { }
     return "mcq";
   }
 
@@ -1115,9 +1850,9 @@
   const storage = (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local)
     ? chrome.storage.local
     : {
-        get: (keys, cb) => { if (cb) cb({}); },
-        set: (data, cb) => { if (cb) cb(); }
-      };
+      get: (keys, cb) => { if (cb) cb({}); },
+      set: (data, cb) => { if (cb) cb(); }
+    };
 
   // Restore strict agreement preference (default: false)
   storage.get(["quizzy_strict_agreement"], (res) => {
@@ -1153,30 +1888,26 @@
   }
 
   function applyDotPosition(pos) {
-    let x = (pos && typeof pos.left === "number") ? pos.left : (window.innerWidth - 20);
-    let y = (pos && typeof pos.top === "number") ? pos.top : (window.innerHeight - 20);
+    if (!pos || typeof pos.left !== "number" || typeof pos.top !== "number") {
+      return;
+    }
+    const dotSize = 7;
+    const maxX = Math.max(0, window.innerWidth - dotSize - 3);
+    const maxY = Math.max(0, window.innerHeight - dotSize - 3);
 
-    const maxX = Math.max(0, window.innerWidth - 14);
-    const maxY = Math.max(0, window.innerHeight - 14);
-
-    x = Math.max(6, Math.min(x, maxX));
-    y = Math.max(6, Math.min(y, maxY));
+    const x = Math.max(3, Math.min(pos.left, maxX));
+    const y = Math.max(3, Math.min(pos.top, maxY));
 
     wrapper.style.left = `${x}px`;
     wrapper.style.top = `${y}px`;
   }
 
-  // Apply default position immediately so wrapper is not rendered without coordinates
-  applyBarPosition(null);
-
   storage.get(["quizzy_hud_pos", "quizzy_dot_pos", "quizzy_hud_minimized", "quizzy_hud_hidden"], (res) => {
     if (res && res.quizzy_hud_hidden) {
       setHidden(true);
     }
-    if (res && res.quizzy_hud_minimized) {
-      setMinimized(true);
-    } else if (res && res.quizzy_hud_pos) {
-      applyBarPosition(res.quizzy_hud_pos);
+    if (res && res.quizzy_dot_pos && (!wrapper.style.left || !wrapper.style.top)) {
+      applyDotPosition(res.quizzy_dot_pos);
     }
   });
 
@@ -1279,8 +2010,9 @@
     let newLeft = startLeft + dx;
     let newTop = startTop + dy;
 
-    newLeft = Math.max(6, Math.min(newLeft, window.innerWidth - 14));
-    newTop = Math.max(6, Math.min(newTop, window.innerHeight - 14));
+    const dotSize = 7;
+    newLeft = Math.max(3, Math.min(newLeft, window.innerWidth - dotSize - 3));
+    newTop = Math.max(3, Math.min(newTop, window.innerHeight - dotSize - 3));
 
     wrapper.style.left = `${newLeft}px`;
     wrapper.style.top = `${newTop}px`;
@@ -1315,9 +2047,17 @@
       setMinimized(false);
     });
     miniDot.addEventListener("click", (e) => {
-      if (dotDragDistance < 5) {
+      if (dotDragDistance < 10) {
         if (typeof e.stopPropagation === "function") e.stopPropagation();
-        setMinimized(false);
+        if (!backendOnline) {
+          handleTriggerStartBackend(hudInstance, miniDot);
+          return;
+        }
+        if (isAutoRunning) {
+          stopAutoMode("Auto Mode stopped via dot click");
+        } else {
+          startAutoMode();
+        }
       }
     });
   }
@@ -1347,9 +2087,10 @@
   // ==========================================================================
   // Health Polling (Backend Status)
   // ==========================================================================
-  function checkHealth() {
+  function checkHealth(cb) {
     sendExtensionMessage({ action: "CHECK_HEALTH" }, (res) => {
-      const isOnline = res && res.success && res.data;
+      const isOnline = Boolean(res && res.success && res.data && (res.data.status === "ok" || res.data.status === "degraded"));
+      backendOnline = isOnline;
       if (isOnline) {
         if (healthDot && !isSolving) {
           healthDot.className = "hud-health-dot online";
@@ -1358,14 +2099,24 @@
       } else {
         if (healthDot && !isSolving) {
           healthDot.className = "hud-health-dot";
-          healthDot.title = "Backend Offline";
+          healthDot.title = "Backend: Offline (Click to start backend)";
         }
+      }
+      updateDotState();
+      if (typeof cb === "function") cb(isOnline, res);
+    });
+  }
+
+  if (healthDot) {
+    healthDot.addEventListener("click", () => {
+      if (!backendOnline) {
+        handleTriggerStartBackend(hudInstance, miniDot);
       }
     });
   }
 
   checkHealth();
-  const healthInterval = setInterval(checkHealth, 7000);
+  const healthInterval = setInterval(checkHealth, 2500);
   if (healthInterval && typeof healthInterval.unref === "function") {
     healthInterval.unref();
   }
@@ -1386,6 +2137,10 @@
   function resetSolutionDisplay() {
     latestSolution = null;
     latestExtracted = null;
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_LAST_SELECTED_OPTION__ = null;
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = null;
+    }
     if (badgeOpt) {
       badgeOpt.className = "hud-badge-option hidden";
       badgeOpt.textContent = "";
@@ -1582,6 +2337,10 @@
       if (!isSolving) return;
       solveTimedOut = true;
       isSolving = false;
+      if (isAutoRunning) {
+        autoErrorOccurred = true;
+        autoErrorMessage = "Question solve timed out (>5s)";
+      }
       checkHealth();
       if (answerText) {
         answerText.className = "hud-answer-text uncertain";
@@ -1596,15 +2355,25 @@
 
       if (!res || !res.success || !res.data) {
         isSolving = false;
+        const errMsg = (res && res.error) ? String(res.error) : "Backend solve error";
+        if (errMsg.toLowerCase().includes("fetch") || errMsg.toLowerCase().includes("network") || errMsg.toLowerCase().includes("connect") || errMsg.toLowerCase().includes("offline")) {
+          backendOnline = false;
+        }
+        if (isAutoRunning) {
+          autoErrorOccurred = true;
+          autoErrorMessage = errMsg;
+        }
+        updateDotState();
         checkHealth();
         if (answerText) {
           answerText.className = "hud-answer-text uncertain";
-          answerText.textContent = res && res.error ? res.error : "Backend solve error";
+          answerText.textContent = errMsg;
         }
         if (callback) callback(null, extracted);
         return;
       }
 
+      backendOnline = true;
       renderSolution(res.data, extracted);
       if (callback) callback(res.data, extracted);
     });
@@ -1669,13 +2438,15 @@
     };
   }
 
-  function applyCurrentSolution(callback) {
-    if (!latestSolution || latestSolution.status !== "ok") {
+  function applyCurrentSolution(callback, explicitSolution, explicitExtracted) {
+    const sol = explicitSolution || latestSolution;
+    const ext = explicitExtracted || latestExtracted;
+    if (!sol || sol.status !== "ok") {
       if (callback) callback({ success: false, reason: "No valid solution to apply" });
       return;
     }
 
-    const actionPayload = buildExecuteActionPayload(latestSolution, latestExtracted);
+    const actionPayload = buildExecuteActionPayload(sol, ext);
     if (!actionPayload) {
       if (callback) callback({ success: false, reason: "Could not build action payload" });
       return;
@@ -1723,38 +2494,9 @@
     });
   }
 
-  function clickSkipOnPage(callback) {
-    const exec = window.__QuizZyExecutor || window.QuizZyExecutor;
-    if (exec && typeof exec.clickSkipButton === "function") {
-      exec.clickSkipButton().then((res) => {
-        if (callback) callback(res);
-      }).catch((err) => {
-        if (callback) callback({ ok: false, error: err.message });
-      });
-      return;
-    }
-
-    sendExtensionMessage({ action: "CLICK_SKIP_BUTTON" }, (res) => {
-      if (callback) callback(res && res.result ? res.result : res);
-    });
-  }
-
-  function skipCurrentQuestion(reason, callback) {
-    const msg = reason || "Question timed out (>5s). Skipped.";
-    if (answerText) {
-      answerText.className = "hud-answer-text uncertain";
-      answerText.textContent = msg;
-      answerText.title = msg;
-    }
-    clickSkipOnPage((res) => {
-      if (callback) callback(res);
-    });
-  }
-
   // ==========================================================================
   // Self-Sufficient Auto Mode
   // ==========================================================================
-  let autoStepWatchdog = null;
   let autoStepEpoch = 0;
 
   function updateAutoButtonState(running) {
@@ -1778,10 +2520,41 @@
 
   function startAutoMode() {
     isAutoRunning = true;
+    autoErrorOccurred = false;
+    autoErrorMessage = "";
     autoStepCount = 0;
     autoRetryCount = 0;
-    autoStepEpoch = 0;
+    autoStepEpoch++;
+    resetSolutionDisplay();
     updateAutoButtonState(true);
+    if (wrapper) {
+      resetDotPositionToCorner(wrapper);
+      setHidden(false);
+    }
+    updateDotState();
+
+    if (!backendOnline) {
+      handleTriggerStartBackend(hudInstance, miniDot, () => {
+        if (isAutoRunning) {
+          if (quizzyMode === "code") {
+            sendExtensionMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, (res) => {
+              if (res && res.error) {
+                autoErrorOccurred = true;
+                autoErrorMessage = res.error;
+                stopAutoMode(res.error);
+              } else {
+                autoErrorOccurred = false;
+                autoErrorMessage = "";
+                stopAutoMode("Coding automation complete.");
+              }
+            });
+          } else {
+            runAutoStep();
+          }
+        }
+      });
+      return;
+    }
 
     // Auto-allowlist current host
     const currentHost = (window.location && window.location.hostname) ? window.location.hostname.toLowerCase() : "";
@@ -1795,18 +2568,48 @@
       });
     }
 
+    if (quizzyMode === "code") {
+      sendExtensionMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, (res) => {
+        if (res && res.error) {
+          autoErrorOccurred = true;
+          autoErrorMessage = res.error;
+          stopAutoMode(res.error);
+        } else {
+          autoErrorOccurred = false;
+          autoErrorMessage = "";
+          stopAutoMode("Coding automation complete.");
+        }
+      });
+      return;
+    }
+
     runAutoStep();
   }
 
   function stopAutoMode(message) {
     isAutoRunning = false;
     autoRetryCount = 0;
-    if (autoStepWatchdog) {
-      clearTimeout(autoStepWatchdog);
-      autoStepWatchdog = null;
-    }
     autoStepEpoch++;
     updateAutoButtonState(false);
+
+    const isErrorStop = message && (
+      message.toLowerCase().includes("error") ||
+      message.toLowerCase().includes("uncertain") ||
+      message.toLowerCase().includes("did not advance") ||
+      message.toLowerCase().includes("prevent") ||
+      message.toLowerCase().includes("timed out") ||
+      message.toLowerCase().includes("cannot solve") ||
+      message.toLowerCase().includes("coding question")
+    );
+    if (isErrorStop) {
+      autoErrorOccurred = true;
+      if (!autoErrorMessage) autoErrorMessage = message;
+    } else {
+      autoErrorOccurred = false;
+      autoErrorMessage = "";
+    }
+    updateDotState();
+
     if (message && answerText) {
       if (message.includes("Completed")) {
         answerText.className = "hud-answer-text complete";
@@ -1827,48 +2630,21 @@
     }
     autoStepCount++;
 
-    if (autoStepWatchdog) {
-      clearTimeout(autoStepWatchdog);
-      autoStepWatchdog = null;
-    }
-
     const currentEpoch = ++autoStepEpoch;
     let stepSettled = false;
-
-    // Strict 5-Second Watchdog:
-    // If a question takes longer than five seconds, skip it and advance!
-    autoStepWatchdog = setTimeout(() => {
-      if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
-      stepSettled = true;
-      console.warn(`[QuizZy HUD] Question #${autoStepCount} timed out (>5s). Automatically skipping question.`);
-
-      skipCurrentQuestion("Question timed out (>5s). Skipping...", (skipRes) => {
-        if (!isAutoRunning || currentEpoch !== autoStepEpoch) return;
-        setTimeout(() => {
-          if (!isAutoRunning || currentEpoch !== autoStepEpoch) return;
-          resetSolutionDisplay();
-          runAutoStep();
-        }, 300);
-      });
-    }, 5000);
 
     solveCurrentQuestion((solution, extracted) => {
       if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
 
-      // Content Protection Gate: Advance past pure coding question in quiz auto loop to keep running
+      // Content Protection Gate: Halt on pure coding question in quiz auto loop
       const isPureCoding = (solution && solution.q_type === "code") || (extracted && extracted.q_type === "code");
       const hasOptions = extracted && Array.isArray(extracted.options) && extracted.options.length >= 2;
       if (isPureCoding && !hasOptions) {
         stepSettled = true;
-        clearTimeout(autoStepWatchdog);
-        console.warn("[QuizZy HUD] Coding question detected. Advancing to keep auto mode running.");
-        skipCurrentQuestion("Coding question detected. Advancing...", () => {
-          setTimeout(() => {
-            if (!isAutoRunning) return;
-            resetSolutionDisplay();
-            runAutoStep();
-          }, 400);
-        });
+        console.warn("[QuizZy HUD] Coding question detected. Stopped auto mode (never skip).");
+        autoErrorOccurred = true;
+        autoErrorMessage = "Coding question detected in quiz mode";
+        stopAutoMode("Coding question detected. Solve in Code mode or answer manually.");
         return;
       }
 
@@ -1882,23 +2658,19 @@
 
       if (!hasValidSelection) {
         // If question cannot be parsed or solved yet, keep polling until valid
-        // or advance after retries to keep running despite errors!
+        // or stop after retries to prevent skipping!
         if (!stepSettled && isAutoRunning && currentEpoch === autoStepEpoch) {
+          autoErrorOccurred = true;
+          autoErrorMessage = "Cannot solve question or consensus missing";
+          updateDotState();
           if (autoRetryCount < 8) {
             autoRetryCount++;
             setTimeout(runAutoStep, 350);
             return;
           }
           stepSettled = true;
-          clearTimeout(autoStepWatchdog);
           autoRetryCount = 0;
-          skipCurrentQuestion("Cannot solve question. Advancing to next question...", () => {
-            setTimeout(() => {
-              if (!isAutoRunning) return;
-              resetSolutionDisplay();
-              runAutoStep();
-            }, 400);
-          });
+          stopAutoMode("Cannot solve question. Stopped to prevent skipping.");
           return;
         }
         return;
@@ -1913,15 +2685,10 @@
           (solution.confidence_tier && solution.confidence_tier.includes("HIGH"));
         if (!isHigh) {
           stepSettled = true;
-          clearTimeout(autoStepWatchdog);
-          console.warn("[QuizZy HUD] Model consensus uncertain in strict mode. Advancing to keep running.");
-          skipCurrentQuestion("Consensus uncertain (strict mode). Advancing...", () => {
-            setTimeout(() => {
-              if (!isAutoRunning) return;
-              resetSolutionDisplay();
-              runAutoStep();
-            }, 400);
-          });
+          console.warn("[QuizZy HUD] Model consensus uncertain in strict mode. Stopped to protect accuracy.");
+          autoErrorOccurred = true;
+          autoErrorMessage = "Model consensus uncertain in strict mode";
+          stopAutoMode("Consensus uncertain in strict mode. Stopped to protect accuracy.");
           return;
         }
       }
@@ -1932,32 +2699,20 @@
       applyCurrentSolution((applyRes) => {
         if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
 
-        // Resilient Selection Error Handling: retry, then advance instead of stopping!
+        // Resilient Selection Error Handling: retry, then stop instead of skipping!
         if (!applyRes || applyRes.ok === false || applyRes.selected === false || !applyRes.success) {
+          autoErrorOccurred = true;
+          autoErrorMessage = "Selection verification failed";
+          updateDotState();
           if (autoRetryCount < 3) {
             autoRetryCount++;
             setTimeout(runAutoStep, 250);
             return;
           }
           stepSettled = true;
-          clearTimeout(autoStepWatchdog);
           autoRetryCount = 0;
-          console.warn("[QuizZy HUD] Selection verification failed. Applying DOM highlight and advancing to next question.");
-          if (window.__QuizZyExtractor && typeof window.__QuizZyExtractor.applyDomHighlight === "function") {
-            if (solution && solution.q_type === "order" && Array.isArray(solution.ordered_texts)) {
-              window.__QuizZyExtractor.applyDomHighlight({ target_order_badges: solution.ordered_texts });
-            } else {
-              const tIdx = (typeof solution.selected_index === "number") ? solution.selected_index : 0;
-              window.__QuizZyExtractor.applyDomHighlight({ selected_index: tIdx });
-            }
-          }
-          skipCurrentQuestion("Selection error. Advancing to next question...", () => {
-            setTimeout(() => {
-              if (!isAutoRunning) return;
-              resetSolutionDisplay();
-              runAutoStep();
-            }, 350);
-          });
+          console.warn("[QuizZy HUD] Selection verification failed. Stopped to prevent incorrect submission.");
+          stopAutoMode("Selection error. Stopped to prevent incorrect submission.");
           return;
         }
 
@@ -1973,9 +2728,19 @@
           clickNextOnPage((nextRes) => {
             if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
 
+            if (nextRes && nextRes.ok === false && nextRes.error && nextRes.error.includes("NO_OPTION_SELECTED")) {
+              stepSettled = true;
+              autoErrorOccurred = true;
+              autoErrorMessage = "No option selected";
+              updateDotState();
+              stopAutoMode("Cannot submit question: No option selected.");
+              return;
+            }
+
             if (nextRes && nextRes.step === "quiz_completed") {
               stepSettled = true;
-              clearTimeout(autoStepWatchdog);
+              autoErrorOccurred = false;
+              autoErrorMessage = "";
               stopAutoMode("Quiz Completed!");
               return;
             }
@@ -1998,8 +2763,10 @@
               if (newSig && newSig !== prevSig) {
                 clearInterval(pollInterval);
                 stepSettled = true;
-                clearTimeout(autoStepWatchdog);
+                autoErrorOccurred = false;
+                autoErrorMessage = "";
                 resetSolutionDisplay();
+                updateDotState();
                 setTimeout(runAutoStep, 80);
                 return;
               }
@@ -2008,20 +2775,15 @@
                 clearInterval(pollInterval);
                 if (!stepSettled) {
                   stepSettled = true;
-                  clearTimeout(autoStepWatchdog);
-                  skipCurrentQuestion("Question did not advance after submit. Skipping...", () => {
-                    setTimeout(() => {
-                      if (!isAutoRunning) return;
-                      resetSolutionDisplay();
-                      runAutoStep();
-                    }, 300);
-                  });
+                  autoErrorOccurred = true;
+                  autoErrorMessage = "Question did not advance after submit";
+                  stopAutoMode("Question did not advance after submit.");
                 }
               }
             }, 75);
           });
         }, 120);
-      });
+      }, solution, extracted);
     });
   }
 
@@ -2043,22 +2805,9 @@
           miniDot.classList.remove("auto-running");
         }
       }
-      storage.get(["quizzy_dot_pos"], (res) => {
-        if (res.quizzy_dot_pos && typeof res.quizzy_dot_pos.left === "number") {
-          applyDotPosition(res.quizzy_dot_pos);
-        } else {
-          const defaultDotX = Math.max(8, window.innerWidth - 34);
-          const defaultDotY = Math.max(8, window.innerHeight - 34);
-          wrapper.style.left = `${defaultDotX}px`;
-          wrapper.style.top = `${defaultDotY}px`;
-        }
-      });
     } else {
       if (miniDot) miniDot.classList.add("hidden");
       if (fullBar) fullBar.classList.remove("hidden");
-      storage.get(["quizzy_hud_pos"], (res) => {
-        applyBarPosition(res.quizzy_hud_pos);
-      });
     }
   }
 
@@ -2080,14 +2829,21 @@
 
   function toggleVisibility() {
     const willBeHidden = !isHiddenState;
+    if (!willBeHidden) {
+      positionWrapperAtCurrentLocation(wrapper);
+    }
     setHidden(willBeHidden);
     if (!willBeHidden && isMinimizedState) {
       setMinimized(false);
+    }
+    if (!willBeHidden) {
+      updateDotState();
     }
     return !isHiddenState;
   }
 
   function show(forceExpand = false) {
+    positionWrapperAtCurrentLocation(wrapper);
     setHidden(false);
     if (forceExpand || isMinimizedState) {
       setMinimized(false);
@@ -2182,16 +2938,6 @@
     });
   }
 
-  if (btnSkip) {
-    btnSkip.addEventListener("click", () => {
-      skipCurrentQuestion("Skipped by user", (res) => {
-        if (res && res.button_text && answerText) {
-          answerText.textContent = `Skipped: ${res.button_text}`;
-        }
-      });
-    });
-  }
-
   if (btnFlag) {
     btnFlag.addEventListener("click", () => {
       if (!latestSolution || !latestExtracted) return;
@@ -2263,14 +3009,57 @@
     Alt: null
   };
 
+  let lastGlobalHandledEvent = null;
+
   function executeModifierAction(modName, isDouble, e) {
+    if (e && (e === lastGlobalHandledEvent || e.__quizzy_handled__)) return;
+
+    if (isProctoredCodingPage()) {
+      if (e) {
+        lastGlobalHandledEvent = e;
+        e.__quizzy_handled__ = true;
+      }
+      const codingHud = getActiveCodingHudInstance();
+      if (modName === "Control") {
+        const wasMounted = Boolean(codingHud && codingHud.wrapper);
+        mountCodingDotHud(codingHud);
+        if (codingHud) {
+          resetDotPositionToCorner(codingHud.wrapper);
+          if (!wasMounted || codingHud.isHidden()) {
+            codingHud.show();
+          } else {
+            codingHud.hide();
+          }
+        }
+      } else if (modName === "Shift" || modName === "Fn") {
+        mountCodingDotHud(codingHud);
+        if (codingHud) {
+          if (codingHud.isAutoRunning) {
+            codingHud.stopAuto();
+          } else {
+            resetDotPositionToCorner(codingHud.wrapper);
+            codingHud.show();
+            codingHud.startAuto();
+          }
+        }
+      }
+      return;
+    }
+
     if (modName === "Control") {
+      if (e) {
+        lastGlobalHandledEvent = e;
+        e.__quizzy_handled__ = true;
+      }
+
       if (isSidePanelOpen) {
         sendExtensionMessage({ action: "CLOSE_SIDEPANEL" });
         isSidePanelOpen = false;
+        resetDotPositionToCorner(wrapper);
         setHidden(false);
         setMinimized(false);
       } else {
+        resetDotPositionToCorner(wrapper);
         toggleVisibility();
       }
     } else if (modName === "Alt") {
@@ -2290,13 +3079,19 @@
         }
       }
     } else if (modName === "Fn" || modName === "Shift") {
+      if (e) {
+        lastGlobalHandledEvent = e;
+        e.__quizzy_handled__ = true;
+      }
+
       if (isSidePanelOpen) {
         sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_auto" });
       } else {
         if (isAutoRunning) {
           stopAutoMode("Stopped via hotkey");
         } else {
-          if (isHiddenState) setHidden(false);
+          resetDotPositionToCorner(wrapper);
+          setHidden(false);
           startAutoMode();
         }
       }
@@ -2304,6 +3099,10 @@
   }
 
   function handleModifierDoubleTap(modName, e) {
+    if (modName === "Control" || modName === "Shift") {
+      executeModifierAction(modName, false, e);
+      return;
+    }
     const now = Date.now();
     const last = lastTapTimes[modName] || 0;
     const diff = now - last;
@@ -2333,6 +3132,9 @@
   function onGlobalKeyDown(e) {
     if (!e) return;
     if (e.key === "Escape" || e.key === "Esc") {
+      ctrlComboUsed = true;
+      shiftComboUsed = true;
+      altComboUsed = true;
       if (isSidePanelOpen) {
         sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "escape" });
         if (typeof e.preventDefault === "function") e.preventDefault();
@@ -2382,20 +3184,6 @@
         }
         return;
       }
-      if (key === "k" || code === "KeyK" || key === "w" || code === "KeyW") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_skip" });
-        } else {
-          skipCurrentQuestion("Skipped (Alt+K)", (res) => {
-            if (res && res.button_text && answerText) {
-              answerText.textContent = `Skipped: ${res.button_text}`;
-            }
-          });
-        }
-        return;
-      }
       if (key === "m" || code === "KeyM") {
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
@@ -2428,25 +3216,46 @@
 
     if (e.repeat) return;
 
-    const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight";
+    const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
     const isAlt = e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
-    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight";
+    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
     const isZ = e.key === "z" || e.key === "Z" || e.code === "KeyZ";
 
     if (isControl) {
+      if (ctrlDown) return;
       ctrlDown = true;
       ctrlComboUsed = false;
-    } else if (isAlt) {
-      altDown = true;
-      altComboUsed = false;
-    } else if (isShift) {
+      return;
+    } else {
+      if (ctrlDown) ctrlComboUsed = true;
+    }
+
+    if (isShift) {
+      if (shiftDown) return;
       shiftDown = true;
       shiftComboUsed = false;
-    } else if (isFnKey(e)) {
+      return;
+    } else {
+      if (shiftDown) shiftComboUsed = true;
+    }
+
+    if (isAlt) {
+      altDown = true;
+      altComboUsed = false;
+    } else {
+      if (altDown) altComboUsed = true;
+    }
+
+    if (isFnKey(e)) {
       fnDown = true;
       fnComboUsed = false;
       handleModifierDoubleTap("Fn", e);
-    } else if (isZ) {
+      return;
+    } else {
+      if (fnDown) fnComboUsed = true;
+    }
+
+    if (isZ) {
       const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
       if (!isEditableElement(e.target) && !isEditableElement(activeEl) && !e.ctrlKey && !e.altKey && !e.metaKey && !ctrlDown && !altDown) {
         zDown = true;
@@ -2456,25 +3265,21 @@
         zComboUsed = true;
       }
     } else {
-      if (ctrlDown) ctrlComboUsed = true;
-      if (altDown) altComboUsed = true;
-      if (shiftDown) shiftComboUsed = true;
-      if (fnDown) fnComboUsed = true;
       if (zDown) zComboUsed = true;
     }
   }
 
   function onGlobalKeyUp(e) {
-    if (!e) return;
-    const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight";
+    if (!e || e === lastGlobalHandledEvent || e.__quizzy_handled__) return;
+    const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
     const isAlt = e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
-    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight";
+    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
     const isZ = e.key === "z" || e.key === "Z" || e.code === "KeyZ";
 
     if (isControl) {
       ctrlDown = false;
       if (!ctrlComboUsed) {
-        handleModifierDoubleTap("Control", e);
+        executeModifierAction("Control", false, e);
       }
     } else if (isAlt) {
       altDown = false;
@@ -2484,8 +3289,9 @@
     } else if (isShift) {
       shiftDown = false;
       if (!shiftComboUsed) {
-        handleModifierDoubleTap("Shift", e);
+        executeModifierAction("Shift", false, e);
       }
+      shiftComboUsed = false;
     } else if (isFnKey(e)) {
       fnDown = false;
       if (!fnComboUsed) {
@@ -2500,13 +3306,51 @@
     }
   }
 
-  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-    window.addEventListener("keydown", onGlobalKeyDown, { capture: true, passive: false });
-    window.addEventListener("keyup", onGlobalKeyUp, { capture: true, passive: false });
+  function onGlobalPointerDown(e) {
+    if (!e || e === lastGlobalHandledEvent || e.__quizzy_handled__) return;
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+      ctrlComboUsed = true;
+      const isInsideHud = e.target && (
+        (miniDot && (e.target === miniDot || (miniDot.contains && miniDot.contains(e.target)))) ||
+        (wrapper && (e.target === wrapper || (wrapper.contains && wrapper.contains(e.target))))
+      );
+      if (!isInsideHud) {
+        lastGlobalHandledEvent = e;
+        e.__quizzy_handled__ = true;
+
+        resetDotPositionToCorner(wrapper);
+        toggleVisibility();
+      }
+    }
   }
-  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+
+  function resetGlobalModifierStates() {
+    ctrlDown = false;
+    ctrlComboUsed = false;
+    shiftDown = false;
+    shiftComboUsed = false;
+    altDown = false;
+    altComboUsed = false;
+    fnDown = false;
+    fnComboUsed = false;
+    zDown = false;
+    zComboUsed = false;
+  }
+
+  if (typeof window !== "undefined" && !window.__QUIZZY_GLOBAL_KEYBOARD_INITIALIZED__) {
+    window.__QUIZZY_GLOBAL_KEYBOARD_INITIALIZED__ = true;
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("keydown", onGlobalKeyDown, { capture: true, passive: false });
+      window.addEventListener("keyup", onGlobalKeyUp, { capture: true, passive: false });
+      window.addEventListener("pointerdown", onGlobalPointerDown, { capture: true, passive: true });
+      window.addEventListener("blur", resetGlobalModifierStates);
+    }
+  } else if (typeof document !== "undefined" && !document.__QUIZZY_GLOBAL_KEYBOARD_INITIALIZED__ && typeof document.addEventListener === "function") {
+    document.__QUIZZY_GLOBAL_KEYBOARD_INITIALIZED__ = true;
     document.addEventListener("keydown", onGlobalKeyDown, { capture: true, passive: false });
     document.addEventListener("keyup", onGlobalKeyUp, { capture: true, passive: false });
+    document.addEventListener("pointerdown", onGlobalPointerDown, { capture: true, passive: true });
+    document.addEventListener("blur", resetGlobalModifierStates);
   }
 
   // Runtime message listener for background commands & shortcuts
@@ -2564,9 +3408,6 @@
         } else if (cmd === "trigger_next") {
           clickNextOnPage();
           if (typeof sendResponse === "function") sendResponse({ handled: true, success: true });
-        } else if (cmd === "trigger_skip") {
-          skipCurrentQuestion("Skipped via shortcut");
-          if (typeof sendResponse === "function") sendResponse({ handled: true, success: true });
         } else {
           if (typeof sendResponse === "function") sendResponse({ handled: false });
         }
@@ -2595,6 +3436,11 @@
     isMinimized: () => isMinimizedState,
     get isAutoRunning() { return isAutoRunning; },
     get isSidePanelOpen() { return isSidePanelOpen; },
+    get isBackendOnline() { return backendOnline; },
+    get autoErrorOccurred() { return autoErrorOccurred; },
+    get autoErrorMessage() { return autoErrorMessage; },
+    updateDotState,
+    checkHealth,
     setSidePanelOpen: (val) => {
       isSidePanelOpen = Boolean(val);
       if (isSidePanelOpen) hide();
@@ -2606,7 +3452,6 @@
     setHidden,
     solve: solveCurrentQuestion,
     apply: applyCurrentSolution,
-    skip: skipCurrentQuestion,
     next: clickNextOnPage,
     startAuto: startAutoMode,
     stopAuto: stopAutoMode,
@@ -2640,6 +3485,11 @@
     miniDot,
     ...hudInstance,
     get isAutoRunning() { return isAutoRunning; },
-    get isSidePanelOpen() { return isSidePanelOpen; }
+    get isSidePanelOpen() { return isSidePanelOpen; },
+    get isBackendOnline() { return backendOnline; },
+    get autoErrorOccurred() { return autoErrorOccurred; },
+    get autoErrorMessage() { return autoErrorMessage; },
+    updateDotState,
+    checkHealth
   };
 })();

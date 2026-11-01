@@ -96,12 +96,46 @@ function initializeStorageDefaults() {
   }
 }
 
+function injectIntoOpenTabs() {
+  if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.query) {
+    chrome.tabs.query({}, (tabs) => {
+      if (!tabs || !Array.isArray(tabs)) return;
+      for (const t of tabs) {
+        if (!t || !t.id || !t.url) continue;
+        if (t.url.startsWith("chrome://") || t.url.startsWith("edge://") || t.url.startsWith("chrome-extension://")) continue;
+        try {
+          const urlObj = new URL(t.url);
+          const hostname = urlObj.hostname.toLowerCase();
+          const defaultAllowed = ["learning.ccbp.in", "127.0.0.1", "localhost", "::1"];
+          if (defaultAllowed.includes(hostname)) {
+            injectAndToggleFloatingHud(t.id, false, false);
+          } else if (chrome.storage && chrome.storage.local) {
+            chrome.storage.local.get(["allowedHosts", "auto_mode_allowlist"], (data) => {
+              const allowed = (data.allowedHosts || []).concat(data.auto_mode_allowlist || []);
+              if (allowed.includes(hostname)) {
+                injectAndToggleFloatingHud(t.id, false, false);
+              }
+            });
+          }
+        } catch (_) {}
+      }
+    });
+  }
+}
+
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {
   chrome.runtime.onInstalled.addListener(() => {
     initializeStorageDefaults();
+    injectIntoOpenTabs();
+  });
+}
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    injectIntoOpenTabs();
   });
 }
 initializeStorageDefaults();
+injectIntoOpenTabs();
 
 // Configure side panel behavior: Disable opening on action click so Floating Bar is the primary UX
 if (typeof chrome !== "undefined" && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
@@ -560,14 +594,17 @@ async function handleTriggerApply(message, targetTab) {
 }
 
 // Async Handler: Trigger Auto Loop (Alt+N)
+let isCodingAutoAborted = false;
 async function handleTriggerAutoLoop(message, targetTab) {
   if (!targetTab || !targetTab.id) {
     return { success: false, error: "No target tab found." };
   }
+  isCodingAutoAborted = false;
   const tabId = targetTab.id;
   updateActionBadge("WRT", "#D97706", tabId);
 
   try {
+    if (isCodingAutoAborted) return { success: false, aborted: true, error: "Auto Mode stopped by user" };
     let codeToApply = (message && message.code) || (message && message.payload && message.payload.code) || "";
 
     const editorRes = await chrome.scripting.executeScript({
@@ -635,6 +672,8 @@ async function handleTriggerAutoLoop(message, targetTab) {
       return { success: false, error: "No code available for auto-loop" };
     }
 
+    if (isCodingAutoAborted) return { success: false, aborted: true, error: "Auto Mode stopped by user" };
+
     updateActionBadge("WRT", "#D97706", tabId);
     try {
       await chrome.scripting.executeScript({
@@ -699,6 +738,30 @@ async function handleTriggerAutoLoop(message, targetTab) {
   }
 }
 
+// Native Messaging Helper for Backend Launching
+function startBackendNative(callback) {
+  const hostName = "com.quizzy.launcher";
+  if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.sendNativeMessage !== "function") {
+    if (callback) callback({ success: false, error: "sendNativeMessage API not available" });
+    return;
+  }
+
+  try {
+    chrome.runtime.sendNativeMessage(hostName, { action: "START_BACKEND" }, (response) => {
+      if (chrome.runtime.lastError) {
+        const errMsg = chrome.runtime.lastError.message || "Native host error";
+        console.warn("[QuizZy] Native backend launcher message error:", errMsg);
+        if (callback) callback({ success: false, error: errMsg });
+        return;
+      }
+      if (callback) callback(response || { success: true, status: "started" });
+    });
+  } catch (err) {
+    console.warn("[QuizZy] Native backend launcher exception:", err);
+    if (callback) callback({ success: false, error: err.message });
+  }
+}
+
 // ==========================================================================
 // Global Runtime Message Router
 // ==========================================================================
@@ -710,6 +773,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const action = message.action || message.type;
 
   // 0. Sidepanel state queries and mutual exclusivity commands
+  if (action === "STOP_AUTO" || action === "KILL_SWITCH_TRIGGERED") {
+    isCodingAutoAborted = true;
+    resolveTargetTab(message, sender).then(async (targetTab) => {
+      if (targetTab && targetTab.id) {
+        chrome.scripting.executeScript({
+          target: { tabId: targetTab.id },
+          world: "ISOLATED",
+          func: () => {
+            if (typeof window.QuizZyExecutor !== "undefined" && typeof window.QuizZyExecutor.abortCodingAutomation === "function") {
+              window.QuizZyExecutor.abortCodingAutomation();
+            }
+          }
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+    const targetTabId = (sender && sender.tab) ? sender.tab.id : undefined;
+    updateActionBadge("", "", targetTabId);
+    sendResponse({ success: true, stopped: true });
+    return false;
+  }
   if (action === "GET_SIDEPANEL_STATE") {
     sendResponse({ success: true, isOpen: isSidePanelOpen });
     return false;
@@ -754,6 +837,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .then((data) => sendResponse({ success: true, data }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true; // asynchronous response
+  }
+
+  // 1b. Start local backend server via Native Messaging Host
+  if (action === "START_BACKEND") {
+    startBackendNative((res) => {
+      sendResponse(res);
+    });
     return true; // asynchronous response
   }
 
@@ -984,42 +1075,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // 7b. Click Skip Button
+  // 7b. Click Skip Button (Disabled - QuizZy does not skip questions)
   if (action === "CLICK_SKIP_BUTTON") {
-    resolveTargetTab(message, sender).then(async (targetTab) => {
-      if (!targetTab || !targetTab.id) {
-        sendResponse({ success: false, error: "No active tab found for Skip button click." });
-        return;
-      }
-      const tabId = targetTab.id;
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["executor.js"]
-        });
-
-        const results = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          func: async (customSkipSelector) => {
-            const exec = window.QuizZyExecutor || window.__QuizZyExecutor;
-            if (exec && typeof exec.clickSkipButton === "function") {
-              return await exec.clickSkipButton(customSkipSelector);
-            }
-            return { success: false, error: "QuizZyExecutor not loaded in tab." };
-          },
-          args: [message.customSkipSelector || ""]
-        });
-
-        sendResponse(results && results[0] ? results[0].result : { success: false, error: "Empty skip button result." });
-      } catch (err) {
-        sendResponse({ success: false, error: `Skip button click error: ${err.message}` });
-      }
-    }).catch((err) => {
-      sendResponse({ success: false, error: err.message });
-    });
-    return true;
+    sendResponse({ success: false, disabled: true, error: "Skipping questions operation is completely disabled." });
+    return false;
   }
 
   // 7c. Swipe or Advance Question (Resilient skip / next / carousel gesture)
@@ -1044,9 +1103,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const exec = window.QuizZyExecutor || window.__QuizZyExecutor;
             if (exec && typeof exec.swipeOrAdvanceQuestion === "function") {
               return await exec.swipeOrAdvanceQuestion(customSelector);
-            }
-            if (exec && typeof exec.clickSkipButton === "function") {
-              return await exec.clickSkipButton(customSelector);
             }
             return { success: false, error: "QuizZyExecutor not loaded in tab." };
           },

@@ -1,10 +1,10 @@
 """
-Test Suite: Numeric MCQ Extraction & 5-Second Auto-Skip Watchdog
+Test Suite: Numeric MCQ Extraction & Total Removal of Skipping Operations
 Validates:
 1. Accurate extraction of MCQs with single-digit numeric options (e.g. Question 7/15: options '5', '6', '4', '3').
 2. Non-interference with Drag-and-Drop ordering slot badges.
-3. Executor clickSkipButton finds and clicks host page SKIP buttons (with fallback to NEXT).
-4. Floating HUD 5-second watchdog timer, Alt+K hotkey, and HUD skip methods.
+3. Executor clickSkipButton is completely disabled and never clicks host page SKIP buttons.
+4. Floating HUD has completely removed 5-second auto-skip watchdog, Alt+K hotkey, and HUD skip methods.
 5. End-to-end backend solve verification for Question 7/15.
 """
 
@@ -475,21 +475,19 @@ const exec = sandbox.window.QuizZyExecutor;
 """
     out = run_node_eval(script)
     res = out["res"]
-    assert res["ok"] is True or res["success"] is True
-    assert out["skipWasClicked"] is True
-    assert "skip" in (res.get("step") or res.get("action", ""))
+    assert res.get("ok") is False or res.get("success") is False
+    assert out["skipWasClicked"] is False, "Must NOT click host page Skip button"
+    assert "disabled" in (res.get("error", "") + str(res.get("disabled", ""))).lower()
 
 
-def test_floating_hud_has_skip_and_watchdog_capabilities():
-    """Verify floating_hud.js contains skipCurrentQuestion, Alt+K hotkey, and 5000ms watchdog."""
+def test_floating_hud_skipping_and_watchdog_totally_removed():
+    """Verify floating_hud.js has completely removed skipCurrentQuestion, Alt+K hotkey, and 5000ms watchdog."""
     hud_code = (PROJECT_ROOT / "extension" / "floating_hud.js").read_text(encoding="utf-8")
-    assert "skipCurrentQuestion" in hud_code
-    assert "clickSkipOnPage" in hud_code
-    assert "CLICK_SKIP_BUTTON" in hud_code
-    assert "autoStepWatchdog" in hud_code
-    assert "5000" in hud_code, "Must have 5000ms watchdog timer"
-    assert "Alt+K" in hud_code or 'key === "k"' in hud_code or 'key === "K"' in hud_code
-    assert "hud-btn-skip" in hud_code
+    assert "skipCurrentQuestion" not in hud_code, "skipCurrentQuestion must be removed"
+    assert "clickSkipOnPage" not in hud_code, "clickSkipOnPage must be removed"
+    assert "CLICK_SKIP_BUTTON" not in hud_code, "CLICK_SKIP_BUTTON must be removed"
+    assert "autoStepWatchdog" not in hud_code, "autoStepWatchdog must be removed"
+    assert "hud-btn-skip" not in hud_code, "hud-btn-skip button must be removed"
 
 
 def test_question_7_dual_model_backend_solve():
