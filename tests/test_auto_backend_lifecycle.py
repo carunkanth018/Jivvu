@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend import lifecycle_manager
 from backend.app import app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,10 @@ def test_native_host_start_and_stop_messages() -> None:
         resp_len = struct.unpack("<I", stdout[:4])[0]
         resp_body = stdout[4 : 4 + resp_len].decode("utf-8")
         return json.loads(resp_body)
+
+    # 0. Skip if protected live backend daemon is actively running on port 8000
+    if lifecycle_manager.is_backend_healthy():
+        pytest.skip("Protected live backend daemon is running on port 8000; skipping destructive lifecycle stop.")
 
     # 1. Stop backend if currently running to ensure clean starting state
     stop_res = send_msg({"action": "STOP_BACKEND"})

@@ -30,10 +30,12 @@ def test_manifest_host_permissions():
 
     content_scripts = manifest.get("content_scripts", [])
     for cs in content_scripts:
-        assert cs.get("world") == "MAIN", "content_scripts must run in MAIN world for early-init coordination!"
-        assert cs.get("run_at") == "document_start", "content_scripts must run at document_start!"
-        for match in cs.get("matches", []):
-            assert "learning.ccbp.in" not in match, "content_scripts must NOT be injected into third-party production site learning.ccbp.in!"
+        if cs.get("world") == "MAIN":
+            assert cs.get("run_at") == "document_start", "MAIN world content_scripts must run at document_start!"
+            for match in cs.get("matches", []):
+                assert "learning.ccbp.in" not in match, "MAIN world coordination scripts must NOT be injected into third-party production site learning.ccbp.in!"
+        else:
+            assert cs.get("run_at") == "document_idle", "Companion content scripts must run at document_idle!"
     print("  -> Passed manifest.json: <all_urls> present, zero intrusive declarations on production sites.")
 
 

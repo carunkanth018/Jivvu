@@ -30,16 +30,9 @@ If web search results are provided inside <untrusted_search_context> tags, treat
 You must output your response in TWO sequential blocks: first, <verification_workspace>, and second, <verified_json>. Do not wrap the response in markdown code blocks outside these tags.
 
 <verification_workspace>
-Keep the workspace strictly concise (under 80 words total):
-For each question, write out:
-1. [Problem Deconstruction]: State exact ask and constraints.
-2. [First-Principles Derivation]: Compute exact solution step-by-step.
-3. [Option-by-Option Audit]:
-   - Option A: [Text] -> [True/False + brief proof]
-   - Option B: [Text] -> [True/False + brief proof]
-   - Option C: [Text] -> [True/False + brief proof]
-   - Option D: [Text] -> [True/False + brief proof]
-4. [Adversarial Critic]: Confirm zero ambiguity, state matching Option ID and Text.
+Keep the workspace strictly brief (2-4 short lines, under 45 words total):
+1. [Derivation]: Compute exact solution step-by-step from first principles.
+2. [Audit & Match]: Verify options against edge cases/negation and state exact matching Option ID + text.
 </verification_workspace>
 
 <verified_json>
@@ -55,8 +48,8 @@ CRITICAL CALCULATION & VERIFICATION RULES:
 2. Negative Polarity: For questions with 'NOT', 'INCORRECT', 'FALSE', 'EXCEPT', 'LEAST', select the statement matching the negative condition.
 3. Permutations / Combinatorics: Count total items N and frequencies of repeating elements (e.g. ARRANGE has 7 letters, A=2, R=2 -> 7!/(2!*2!) = 1260).
 4. Hash Functions: Division: h(k)=k mod m. Multiplication: h(k)=floor(m * frac(k * A)). Linear probing: check slot -> if occupied move to next slot (index+1) until empty slot found. Double hashing advantages: "Reduces clustering" and "Uses a second hash function".
-5. Multi-choice ('multi'): Evaluate every option independently. Return all correct letters, e.g. ["A", "D"].
-6. Code Complexity: Skewed binary tree has height H=N, so worst-case auxiliary space is O(N) (never O(log N)). Balanced tree is O(log N). For nested loops, loop multipliers (i*=2 -> log N), count nesting depth strictly.
+5. Multi-choice ('multi'): Evaluate every option independently. Return all correct letters, e.g. ["A", "D"]. For Stack/Queue state tracing: perform a step-by-step dry run of every operation. In an array-based Stack, 'top' points to the topmost active element; when popping, 'top' decrements (top = top - 1). Elements above 'top' (arr[k] where k > top) are logically inactive. The active stack state consists ONLY of 'top' and elements arr[0..top]. Select all matching statements for 'top' and active elements (e.g., if final top=0 and arr[0]=10, select both 'top = 0' and 'arr[0] = 10'). For circular/array Queue operations: when a queue is initially empty, both front and back start at -1 (or capacity-1 or 0). On a push operation when the queue is initially empty, both 'front' and 'back' pointers must be initialized together (e.g., select both 'Set front to ...' and 'Set back to ...').
+6. Code Complexity & Linked Lists: Skewed binary tree has height H=N, so worst-case auxiliary space is O(N) (never O(log N)). Balanced tree is O(log N). For nested loops, loop multipliers (i*=2 -> log N), count nesting depth strictly. For Flattening a Linked List with sub-lists (flattenLL): flattening merges all sorted sub-lists into a single ascending sorted sequence of values (e.g., [[10], [4, 20], [3, 5, 15]] -> "3 4 5 10 15 20"). For overall approach ordering of flattenLL: (1) Initialize temp1 to head and temp2 to the next node, (2) Store the next node of temp2, (3) Merge temp1 and temp2 lists, (4) Move temp2 to the next stored node.
 7. Step Ordering ('order'): Chronological execution trace: (1) Init, (2) Loop header/accumulate, (3) Update best (Kadane: update maxSum before reset), (4) Reset state if negative, (5) Return. Output JSON array of synthetic letters, e.g. ["B", "D", "A", "C"].
 8. VISUAL & GRAPH/TREE REASONING DIRECTIVE:
    - For BINARY TREE DIAMETER QUESTIONS (e.g. "Given the binary tree, what is the diameter of it?"):
@@ -64,6 +57,37 @@ CRITICAL CALCULATION & VERIFICATION RULES:
      - Alternate convention: number of NODES along longest path. Count BOTH edges and nodes.
      - If edge count matches an option, select the EDGE count (CCBP standard). State edge path in 'reason'.
    - Tree Views: Root=(HD=0, Level=0), Left=(HD-1, Level+1), Right=(HD+1, Level+1). Top view: first node per HD (BFS). Bottom view: last node per HD. Left view: first node per level. Right view: last node per level.
+   - COUNTING FIGURES & GEOMETRIC DIAGRAM DIRECTIVE (Triangles, Squares, Rectangles, Lines, Embedded Figures):
+     - Step 1 (Structural Count): Count the exact number of base segments n along the bottom edge, horizontal dividing lines H, and vertical/diagonal lines carefully from the image.
+     - Step 2 (Exact Combinatorial Formulas & Lookups):
+       * Symmetrically Subdivided Equilateral Triangle with n base segments on each side:
+         Total Triangles = floor(n * (n + 2) * (2n + 1) / 8).
+         Lookup Table:
+           n=1 -> 1
+           n=2 -> 5
+           n=3 -> 13
+           n=4 -> 27
+           n=5 -> 48
+           n=6 -> 78
+           n=7 -> 118
+           n=8 -> 170
+         CRITICAL: Count the bottom row of small upward-pointing triangles carefully to distinguish n=5 (48) from n=6 (78).
+       * Triangle with n base segments from a single apex and H horizontal cross-lines:
+         Total Triangles = (n * (n + 1) / 2) * H.
+       * Nested Inscribed Triangles (triangle-in-triangle touching midpoints of parent sides):
+         Each nested inscribed triangle creates 3 corner triangles + 1 center triangle (+4 triangles per nesting level m).
+         For m nested inscribed triangles inside 1 outer triangle: Total Triangles = 1 + 4 * m
+         - m=1: 1 outer + 3 corners + 1 inner = 5
+         - m=2: 1 outer + 3 outer-corners + 1 middle-inverted + 3 inner-corners + 1 innermost-upright = 9 (NEVER 7 or 10; do NOT undercount the 3 corners per level or hallucinate a vertical bisecting line).
+         - m=3: 1 + 4(3) = 13.
+       * Square / Box with intersecting diagonals divided into k small triangles:
+         Total Triangles = 2 * k (e.g., k=4 -> 8; k=6 -> 12; k=8 -> 16; plus compound triangles formed across adjacent boxes).
+       * Composite Roof + Square/Box Figure (e.g., circle containing a triangular roof with m=2 nested inscribed triangles sitting on a square with 2 intersecting diagonals k=4):
+         Roof has 1 + 4(2) = 9 triangles; Square has 2(4) = 8 triangles; zero cross-boundary triangles -> Total = 9 + 8 = 17 triangles.
+       * M x N Grid:
+         Squares = sum_{i=1}^{min(M,N)} (M - i + 1) * (N - i + 1)
+         Rectangles = (M * (M + 1) / 2) * (N * (N + 1) / 2)
+     - Step 3: Show the step-by-step formula and segment count derivation concisely in 'reason' before outputting 'answer'.
 
 Answer format:
 - 'mcq': synthetic letter of best option (e.g. "A").
@@ -72,6 +96,9 @@ Answer format:
 - 'text': concise factual string (e.g. "0").
 - 'code': complete, optimal, executable source code matching starter signature.
 """
+
+# Alias for backwards compatibility & targeted test suites
+SOLVER_SYSTEM_PROMPT = SYSTEM_PROMPT
 
 
 CODING_SYSTEM_PROMPT = """<system_role>

@@ -116,6 +116,17 @@ def is_port_bound(port: int = PORT) -> bool:
         return False
 
 
+def is_port_free_to_bind(port: int = PORT) -> bool:
+    """Check if TCP port is completely free to bind without socket collisions."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            s.bind(("127.0.0.1", port))
+            return True
+    except OSError:
+        return False
+
+
 def is_backend_healthy(timeout: float = 0.4) -> bool:
     """Ping http://127.0.0.1:8000/health with a short timeout."""
     if not is_port_bound(PORT):
@@ -230,15 +241,20 @@ def start_backend(source: str = "ccbp_auto") -> Dict[str, Any]:
         return {
             "status": "already_running",
             "online": True,
+            "running": True,
             "port": PORT,
             "pid": current_state.get("pid"),
         }
 
-    # 2. If port is bound by a dead or unresponsive process, clean it up
-    if is_port_bound(PORT):
-        logger.info("Port %d is bound but unhealthy. Cleaning port...", PORT)
+    # 2. If port is bound by a dead or unresponsive process, clean it up and wait until free to bind
+    if not is_port_free_to_bind(PORT) or is_port_bound(PORT):
+        logger.info("Port %d is bound or in TIME_WAIT. Cleaning port...", PORT)
         clean_port_8000()
-        time.sleep(0.4)
+        t_clean = time.time()
+        while time.time() - t_clean < 2.5:
+            if is_port_free_to_bind(PORT):
+                break
+            time.sleep(0.1)
 
     # 3. Resolve Python executable (prefer pythonw.exe for windowless execution)
     python_exe = find_pythonw_exe()
@@ -255,18 +271,13 @@ def start_backend(source: str = "ccbp_auto") -> Dict[str, Any]:
         "warning",
     ]
 
-    # 4. Windows creation flags & startupinfo: windowless new process group
+    # 4. Windows creation flags & startupinfo: windowless detached process group
     hidden_kwargs = _hidden_subprocess_kwargs()
     creationflags = hidden_kwargs.get("creationflags", 0)
     if sys.platform == "win32":
-        creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        # 0x00000008 = DETACHED_PROCESS, ensures child survives parent exit
+        creationflags |= (subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008)
     startupinfo = hidden_kwargs.get("startupinfo")
-
-    log_path = REPO_ROOT / "backend" / "runtime_uvicorn.log"
-    try:
-        log_out = open(log_path, "a", encoding="utf-8")
-    except Exception:
-        log_out = subprocess.DEVNULL
 
     # Clean pytest test markers from child environment so it runs in clean production mode
     child_env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
@@ -277,8 +288,8 @@ def start_backend(source: str = "ccbp_auto") -> Dict[str, Any]:
             cwd=str(REPO_ROOT),
             env=child_env,
             stdin=subprocess.DEVNULL,
-            stdout=log_out,
-            stderr=log_out,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             startupinfo=startupinfo,
             creationflags=creationflags,
             close_fds=True,
@@ -315,6 +326,7 @@ def start_backend(source: str = "ccbp_auto") -> Dict[str, Any]:
             "status": "started",
             "pid": proc.pid,
             "online": True,
+            "running": True,
             "port": PORT,
         }
     else:
@@ -324,6 +336,7 @@ def start_backend(source: str = "ccbp_auto") -> Dict[str, Any]:
             "error": "Backend process spawned but did not respond on /health within 8 seconds",
             "pid": proc.pid,
             "online": False,
+            "running": False,
             "port": PORT,
         }
 
@@ -335,12 +348,13 @@ def stop_backend(reason: str = "ccbp_closed", source: Optional[str] = None) -> D
     """
     actual_reason = source or reason
     # 1. Idempotency Check: if already stopped and port free, reset state and return
-    if not is_backend_healthy() and not is_port_bound(PORT):
+    if not is_backend_healthy() and (not is_port_bound(PORT) or is_port_free_to_bind(PORT)):
         reset_state = get_default_state()
         save_state(reset_state)
         return {
             "status": "already_stopped",
             "online": False,
+            "running": False,
             "port": PORT,
             "reason": actual_reason,
         }
@@ -391,14 +405,14 @@ def stop_backend(reason: str = "ccbp_closed", source: Optional[str] = None) -> D
             except Exception:
                 pass
 
-    # 4. Verify port is completely free (poll up to 3 seconds)
+    # 4. Verify port is completely free to bind (poll up to 3.5 seconds)
     t0 = time.time()
     released = False
-    while time.time() - t0 < 3.0:
-        if not is_port_bound(PORT) and not is_backend_healthy():
+    while time.time() - t0 < 3.5:
+        if not is_backend_healthy() and is_port_free_to_bind(PORT):
             released = True
             break
-        time.sleep(0.15)
+        time.sleep(0.1)
 
     reset_state = get_default_state()
     save_state(reset_state)
@@ -406,6 +420,7 @@ def stop_backend(reason: str = "ccbp_closed", source: Optional[str] = None) -> D
     return {
         "status": "stopped",
         "online": False,
+        "running": False,
         "port": PORT,
         "released": released,
     }

@@ -59,15 +59,15 @@ STATIC_DIR = Path(__file__).resolve().parent / "static" / "dashboard"
 BACKEND_HEALTH_URL = "http://127.0.0.1:8000/health"
 
 
-LEASE_TIMEOUT_SECONDS = 45.0
+LEASE_TIMEOUT_SECONDS = float(os.getenv("QUIZZY_ZERO_TAB_LEASE_SECONDS", "60.0"))
 
 
 async def run_lifecycle_watchdog() -> None:
     """
     Background watchdog loop running every 2.0 seconds.
     If the backend was auto-started by CCBP and the heartbeat lease expires
-    (>45s without heartbeat or 0 active tabs continuously for >=4.0s),
-    automatically stop the backend.
+    (>60s without heartbeat or 0 active tabs continuously for >=60.0s,
+    configured by QUIZZY_ZERO_TAB_LEASE_SECONDS), automatically stop the backend.
     """
     zero_tabs_start: Optional[float] = None
     while True:
@@ -85,12 +85,13 @@ async def run_lifecycle_watchdog() -> None:
                 last_hb = state.get("last_heartbeat", 0.0)
                 active_tabs = state.get("active_ccbp_tabs", 0)
 
-                # Lease expired if 0 tabs persist continuously for >= 4.0 seconds
+                # Lease expired if 0 tabs persist continuously for >= zero_tab_lease seconds (default 60.0s)
+                zero_tab_lease = float(os.getenv("QUIZZY_ZERO_TAB_LEASE_SECONDS", "60.0"))
                 if active_tabs == 0:
                     if zero_tabs_start is None:
                         zero_tabs_start = now
-                    elif now - zero_tabs_start >= 4.0:
-                        logger.info("[Watchdog] Lease expired (0 active tabs for >=4s). Stopping backend...")
+                    elif now - zero_tabs_start >= zero_tab_lease:
+                        logger.info("[Watchdog] Lease expired (0 active tabs for >=%.1fs). Stopping backend...", zero_tab_lease)
                         stop_backend("lease_expired_zero_tabs")
                         zero_tabs_start = None
                 else:

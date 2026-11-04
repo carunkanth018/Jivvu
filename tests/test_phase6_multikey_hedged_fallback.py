@@ -178,6 +178,9 @@ def test_3_parallel_hedged_tiebreaker_early_exit(mock_searxng):
     solve_question completes in < 500ms and cancels Model 2.
     """
     print("\n[Test 3] Testing Parallel Hedged Tie-Breaker Early Exit (<500ms)...")
+    from backend.core.key_pool import reset_provider_cooldown
+    reset_provider_cooldown()
+    reset_key_quarantine()
 
     norm_a = NormalizedAnswer(q_type="mcq", canonical_key="A", selected_index=0, selected_text="Alpha", ordered_texts=[], permutation_indices=[])
     norm_b = NormalizedAnswer(q_type="mcq", canonical_key="B", selected_index=1, selected_text="Beta", ordered_texts=[], permutation_indices=[])
@@ -227,7 +230,8 @@ def test_3_parallel_hedged_tiebreaker_early_exit(mock_searxng):
         },
     }
 
-    with patch("backend.core.llm_client.call_model_with_budget_retry", side_effect=mock_call_with_retry):
+    with patch("backend.core.llm_client.call_model_with_budget_retry", side_effect=mock_call_with_retry), \
+         patch("backend.core.llm_client.fetch_searxng_snippets", return_value=[]):
         t_start = time.perf_counter()
         solver_res = asyncio.run(
             solve_question(

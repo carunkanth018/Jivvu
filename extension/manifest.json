@@ -33,6 +33,23 @@
       "js": ["stealth_shield.js"],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://learning.ccbp.in/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "http://localhost:*/*",
+        "http://127.0.0.1:*/*"
+      ],
+      "js": [
+        "extractor.js",
+        "executor.js",
+        "portal_completion.js",
+        "floating_hud.js",
+        "ccbp_lifecycle_bridge.js"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "background": {

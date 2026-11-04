@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from backend.core.normalizer import (
     normalize_order_answer,
     normalize_text_answer,
 )
+from backend.db_util import connect_sqlite_wal
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "quizzy_cache.db"
@@ -33,13 +35,7 @@ def get_db_path(custom_path: Optional[str] = None) -> Path:
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Open SQLite connection with WAL mode enabled."""
-    path = get_db_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
+    return connect_sqlite_wal(get_db_path(db_path), timeout=10.0)
 
 
 @contextmanager
@@ -109,6 +105,26 @@ def init_db(db_path: Optional[str] = None) -> None:
         conn.commit()
 
 
+_LABEL_PATTERN = r"(?:\(?[a-f1-6]\)?|\(?(?:iv|iii|ii|i)\)?)"
+_RELATIVE_OPTION_REGEX = re.compile(
+    r"\b(?:all|none)\s+of\s+(?:the\s+above|these)\b|"
+    rf"\bboth\s+{_LABEL_PATTERN}\s*(?:and|&)\s*{_LABEL_PATTERN}\b|"
+    rf"\bneither\s+{_LABEL_PATTERN}\s+nor\s+{_LABEL_PATTERN}\b|"
+    r"\b(?:only|options?)\s+\([a-f1-6]\)|"
+    r"\b(?:only|options?)\s+[a-f1-6]\s*$|"
+    r"\b(?:only|options?)\s+[a-f1-6]\s+(?:is|are|and|or)\b|"
+    rf"\boptions?\s+{_LABEL_PATTERN}\s+(?:and|or)\s+{_LABEL_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def is_relative_or_positional_option(text: str) -> bool:
+    """Return True if the option text contains positional/relative references to other options."""
+    if not text:
+        return False
+    return bool(_RELATIVE_OPTION_REGEX.search(str(text).strip()))
+
+
 def compute_cache_key(
     subject: str,
     q_type: str,
@@ -117,13 +133,14 @@ def compute_cache_key(
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
     image_data: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> str:
     """
     Deterministic order-invariant cache key:
     - Normalizes subject and question.
-    - If image_data is provided, includes a SHA-256 digest of image_data.
+    - If image_data or image_url is provided, includes a SHA-256 digest of the visual asset.
     - For code: hashes subject, 'code', question, language, and starter_code.
-    - For mcq and order: normalizes each option string and sorts alphabetically.
+    - For mcq and order: normalizes each option string and sorts alphabetically (unless positional options exist).
     - For text: options list is empty.
     - Returns SHA-256 hex digest.
     """
@@ -132,8 +149,9 @@ def compute_cache_key(
     norm_question = normalize_text_answer(question)
 
     img_hash = ""
-    if image_data and str(image_data).strip():
-        img_hash = hashlib.sha256(str(image_data).strip().encode("utf-8")).hexdigest()[:16]
+    img_source = (image_data or "").strip() or (image_url or "").strip()
+    if img_source:
+        img_hash = hashlib.sha256(img_source.encode("utf-8")).hexdigest()[:16]
 
     if norm_type == "code":
         lang = (language or "").strip().lower()
@@ -141,8 +159,15 @@ def compute_cache_key(
         payload = f"{norm_subject}|code|{norm_question}|{lang}|{starter}|{img_hash}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
     elif norm_type in ("mcq", "order", "multi") and options:
-        norm_opts = sorted([normalize_text_answer(opt) for opt in options])
-        opts_repr = json.dumps(norm_opts, separators=(",", ":"))
+        # Detect positional / relative options (e.g. "Both A and B", "All of the above", "None of the above")
+        # When present, preserve unsorted order in the cache key so positional answers remain accurate.
+        has_relative = any(is_relative_or_positional_option(opt) for opt in options)
+        if has_relative:
+            norm_opts = [normalize_text_answer(opt) for opt in options]
+            opts_repr = "positional:" + json.dumps(norm_opts, separators=(",", ":"))
+        else:
+            norm_opts = sorted([normalize_text_answer(opt) for opt in options])
+            opts_repr = json.dumps(norm_opts, separators=(",", ":"))
     else:
         opts_repr = "[]"
 
@@ -159,6 +184,7 @@ def get_cached_solution(
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
     image_data: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Lookup answer in SQLite cache and dynamically remap synthetic keys
@@ -171,6 +197,7 @@ def get_cached_solution(
         language=language,
         starter_code=starter_code,
         image_data=image_data,
+        image_url=image_url,
     )
     norm_type = q_type.strip().lower()
 
@@ -213,17 +240,28 @@ def get_cached_solution(
                 conn.commit()
                 return None
 
+            used_indices: set = set()
             remapped_indices: List[int] = []
             for target_item in canonical_raw:
                 target_item_norm = normalize_text_answer(str(target_item))
                 found_i = None
                 for idx, opt in enumerate(options):
-                    if normalize_text_answer(opt) == target_item_norm and idx not in remapped_indices:
+                    if idx not in used_indices and normalize_text_answer(opt) == target_item_norm:
                         found_i = idx
                         break
                 if found_i is None:
+                    cand = [
+                        idx for idx, opt in enumerate(options)
+                        if idx not in used_indices and target_item_norm and (target_item_norm in normalize_text_answer(opt) or normalize_text_answer(opt) in target_item_norm)
+                    ]
+                    if len(cand) == 1:
+                        found_i = cand[0]
+
+                if found_i is not None and found_i not in used_indices:
+                    used_indices.add(found_i)
+                    remapped_indices.append(found_i)
+                else:
                     break
-                remapped_indices.append(found_i)
 
             if len(remapped_indices) != len(options):
                 conn.execute("UPDATE cache_stats SET value = value + 1 WHERE metric = 'misses';")
@@ -320,6 +358,7 @@ def cache_solution(
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
     image_data: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> bool:
     """
     Zero-Poison Rule:
@@ -398,6 +437,7 @@ def cache_solution(
         language=language,
         starter_code=starter_code,
         image_data=image_data,
+        image_url=image_url,
     )
     if tier.startswith("HIGH_"):
         score = 1.0
@@ -458,6 +498,7 @@ def record_wrong_answer(
     language: Optional[str] = None,
     starter_code: Optional[str] = None,
     image_data: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Record a wrong answer report with order-invariant cache key.
@@ -473,6 +514,7 @@ def record_wrong_answer(
         language=language,
         starter_code=starter_code,
         image_data=image_data,
+        image_url=image_url,
     )
     norm_type = q_type.strip().lower()
     options_json = json.dumps(options or [])

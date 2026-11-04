@@ -41,8 +41,8 @@ def test_strict_white_and_blue_color_palette():
     ]
 
     # Strip dot glow indicator rules which are required by user specification for dot status
-    hud_styles_bar_only = re.sub(r"\.hud-mini-dot\.glow-(?:red|green|orange)[\s\S]*?\}", "", hud_styles)
-    hud_styles_bar_only = re.sub(r"@keyframes hud-dot-pulse-(?:red|green|orange)[\s\S]*?\}\s*\}", "", hud_styles_bar_only)
+    hud_styles_bar_only = re.sub(r"\.hud-(?:mini-dot\.glow-(?:red|green|orange|violet)|health-dot\.portal-active)[\s\S]*?\}", "", hud_styles)
+    hud_styles_bar_only = re.sub(r"@keyframes (?:hud-dot-pulse-(?:red|green|orange)|quizzyVioletPulse)[\s\S]*?\}\s*\}", "", hud_styles_bar_only)
 
     for pattern in forbidden_colors:
         assert not re.search(pattern, css_code, re.IGNORECASE), f"Found forbidden non-white/blue color {pattern} in sidepanel.css"

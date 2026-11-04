@@ -12,6 +12,37 @@
 (function () {
   "use strict";
 
+  if (typeof window !== "undefined" && window.__QUIZZY_EXECUTOR_LOADED__) {
+    return (typeof module !== "undefined" && module.exports)
+      ? module.exports
+      : window.QuizZyExecutor;
+  }
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_EXECUTOR_LOADED__ = true;
+  }
+
+  let activeExecutionAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+
+  function abortPendingExecution(reason = "Aborted") {
+    try {
+      if (activeExecutionAbortController && typeof activeExecutionAbortController.abort === "function") {
+        activeExecutionAbortController.abort(reason);
+      }
+    } catch (_) {}
+    activeExecutionAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  }
+
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    if (typeof window !== "undefined" && !window.__QUIZZY_EXECUTOR_MSG_LISTENER__) {
+      window.__QUIZZY_EXECUTOR_MSG_LISTENER__ = true;
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message && (message.action === "QUIZZY_ROUTE_CHANGED" || message.action === "KILL_SWITCH_TRIGGERED")) {
+          abortPendingExecution(message.action);
+        }
+      });
+    }
+  }
+
   /**
    * Cleans text content for matching.
    */
@@ -162,8 +193,16 @@
       }
 
       const children = node.childNodes || [];
-      for (let i = 0; i < children.length; i++) {
-        walk(children[i]);
+      if (children.length > 0) {
+        for (let i = 0; i < children.length; i++) {
+          walk(children[i]);
+        }
+      } else if (node.firstChild) {
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          walk(child);
+        }
+      } else {
+        extracted += (node.textContent || node.innerText || "");
       }
     }
 
@@ -239,6 +278,207 @@
 
     const single = clean.replace(/\s+/g, " ").trim();
     return stripDecorativePrefix(single);
+  }
+
+  /**
+   * Dedicated clean code extraction on cloned node trees:
+   * Mirrors 1:1 implementation in extractor.js.
+   */
+  function extractCleanCodeFromClonedNode(rootNode, isOptionCard = false) {
+    if (!rootNode) return "";
+    let clone;
+    try {
+      clone = rootNode.cloneNode(true);
+    } catch (_) {
+      clone = rootNode;
+    }
+
+    // 1. Remove gutter and line-number elements
+    try {
+      const gutterEls = clone.querySelectorAll(
+        ".linenumber, .react-syntax-highlighter-line-number, .ace_gutter, .margin-view-overlays, .line-numbers, [class*='line-number'], [class*='linenumber'], [class*='lineNumbers'], [class*='line_number']"
+      );
+      for (const g of gutterEls) {
+        try { g.remove(); } catch (_) {}
+      }
+
+      const ariaHidden = clone.querySelectorAll("[aria-hidden='true']");
+      for (const ah of ariaHidden) {
+        const cls = (ah.className || "").toString().toLowerCase();
+        const txt = (ah.textContent || "").trim();
+        if (cls.includes("line") || cls.includes("gutter") || /^\d+$/.test(txt)) {
+          try { ah.remove(); } catch (_) {}
+        }
+      }
+
+      // 2-column table gutter removal (gutter <td> + code <td>)
+      const tableRows = clone.querySelectorAll ? Array.from(clone.querySelectorAll("tr")) : [];
+      for (const row of tableRows) {
+        const cells = row.querySelectorAll ? Array.from(row.querySelectorAll("td")) : [];
+        if (cells.length === 2) {
+          const firstText = (cells[0].textContent || "").trim();
+          const firstCls = (cells[0].className || "").toLowerCase();
+          if (/^\d+$/.test(firstText) || firstCls.includes("gutter") || firstCls.includes("line")) {
+            try { cells[0].remove(); } catch (_) {}
+          }
+        }
+      }
+
+      // Flex rows line-number removal (strip .linenumber or leading digit-only spans)
+      const flexLines = clone.querySelectorAll ? clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine'], div[class*='line']") : [];
+      for (const fl of flexLines) {
+        const firstSpan = fl.querySelector ? fl.querySelector("span") : null;
+        if (firstSpan) {
+          const sText = (firstSpan.textContent || "").trim();
+          const sCls = (firstSpan.className || "").toLowerCase();
+          if (/^\d+$/.test(sText) || sCls.includes("linenumber") || sCls.includes("line-number")) {
+            try { firstSpan.remove(); } catch (_) {}
+          }
+        }
+      }
+
+      // Ensure spacing between adjacent inline token elements (e.g. const express)
+      const codeRoots = clone.querySelectorAll ? clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine'], tr, code, pre") : [];
+      const scopeList = codeRoots.length > 0 ? Array.from(codeRoots) : [clone];
+      for (const scope of scopeList) {
+        const spans = scope.querySelectorAll ? Array.from(scope.querySelectorAll("span")) : [];
+        for (let i = 0; i < spans.length - 1; i++) {
+          const cur = spans[i];
+          const next = spans[i + 1];
+          const curText = cur.textContent || "";
+          const nextText = next.textContent || "";
+          if (/[a-zA-Z0-9_$]$/.test(curText) && /^[a-zA-Z0-9_$]/.test(nextText)) {
+            cur.textContent = curText + " ";
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Remove language header badges & action buttons (Copy, etc.)
+    try {
+      const badgeRegex = /^(JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH|COPY|COPIED)$/i;
+      const buttons = clone.querySelectorAll("button, [role='button'], .copy-btn, [class*='copy']");
+      for (const b of buttons) {
+        try { b.remove(); } catch (_) {}
+      }
+
+      const badges = clone.querySelectorAll("[class*='badge'], [class*='header'], [class*='lang'], [class*='title'], span, div");
+      for (const bg of badges) {
+        const txt = (bg.textContent || "").trim();
+        if (badgeRegex.test(txt) && txt.length <= 15) {
+          const children = bg.children || [];
+          if (children.length === 0 || Array.from(children).every(c => badgeRegex.test((c.textContent || "").trim()))) {
+            try { bg.remove(); } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3. Option Card Mode: Strip single-character option badges (A, B, C, D) without stripping single-char answers ('0', '1', 'A')
+    if (isOptionCard) {
+      try {
+        const inputs = clone.querySelectorAll("input[type='radio'], input[type='checkbox']");
+        for (const inp of inputs) {
+          try { inp.remove(); } catch (_) {}
+        }
+        const optionBadges = clone.querySelectorAll("[class*='badge'], [class*='label'], [class*='letter'], [class*='index'], [class*='prefix'], [class*='choice'], span, div, b, strong");
+        let strippedBadge = false;
+        for (const ob of optionBadges) {
+          if (strippedBadge) break;
+          const obTag = (ob.tagName || "").toLowerCase();
+          if (obTag === "code" || obTag === "pre" || (ob.querySelector && ob.querySelector("code, pre"))) continue;
+          const txt = (ob.textContent || "").trim();
+          const fullCloneTxt = (clone.textContent || "").trim();
+          const hasExplicitBadgeCls = /badge|letter|index|prefix/i.test(String(ob.className || ""));
+          if ((/^[A-Fa-f0-9][\.\:\)]\s*$/.test(txt) || (hasExplicitBadgeCls && /^[A-Fa-f0-9][\.\:\)\s]*$/.test(txt))) && fullCloneTxt.length > txt.length) {
+            try {
+              ob.remove();
+              strippedBadge = true;
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 4. Virtualized Editor Fallback (Ace / Monaco)
+    let extractedText = "";
+    try {
+      const monacoEditor = clone.querySelector(".monaco-editor, [class*='monaco-editor']");
+      if (monacoEditor) {
+        const viewLines = Array.from(monacoEditor.querySelectorAll(".view-lines .view-line, .view-line"));
+        if (viewLines.length > 0) {
+          const sorted = viewLines.slice().sort((a, b) => {
+            const topA = parseFloat(a.style && a.style.top ? a.style.top : "0");
+            const topB = parseFloat(b.style && b.style.top ? b.style.top : "0");
+            return topA - topB;
+          });
+          extractedText = sorted.map(l => (l.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+        }
+      }
+
+      if (!extractedText) {
+        const aceEditor = clone.querySelector(".ace_editor, [class*='ace_editor']");
+        if (aceEditor) {
+          const aceLines = Array.from(aceEditor.querySelectorAll(".ace_text-layer .ace_line"));
+          if (aceLines.length > 0) {
+            extractedText = aceLines.map(l => (l.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 5. Full textContent reading for unclipped buffer
+    if (!extractedText) {
+      const lineWrappers = Array.from(clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine']"));
+      if (lineWrappers.length >= 2) {
+        extractedText = lineWrappers.map(w => (w.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+      } else {
+        extractedText = (clone.textContent || clone.innerText || "");
+      }
+    }
+
+    // 6. Text normalization & leading line number sequence stripping
+    const clean = (extractedText || "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/\u00a0/g, " ");
+
+    const lines = clean.split("\n");
+    while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
+    if (lines.length === 0) return "";
+
+    const numPrefixedLines = lines.filter(l => /^\s*\d{1,4}\s*[:\|\.]?\s+/.test(l));
+    const shouldStripLeadingLineNumbers = numPrefixedLines.length >= Math.max(1, Math.floor(lines.length * 0.6));
+
+    const finalLines = [];
+    for (let i = 0; i < lines.length; i++) {
+      let l = lines[i];
+      if (shouldStripLeadingLineNumbers) {
+        l = l.replace(/^\s*\d{1,4}\s*[:\|\.]?\s+/, "");
+      } else {
+        l = l.replace(/^\s*\d{1,4}(?:\s*[:\|]\s*|\s{2,})/, "  ");
+      }
+      finalLines.push(l);
+    }
+
+    while (finalLines.length > 0 && finalLines[0].trim() === "") finalLines.shift();
+    while (finalLines.length > 0 && finalLines[finalLines.length - 1].trim() === "") finalLines.pop();
+
+    let result = finalLines.join("\n");
+    if (isOptionCard) {
+      if (typeof stripDecorativePrefix === "function") {
+        const stripped = stripDecorativePrefix(result);
+        if (stripped.length > 0) result = stripped;
+      }
+      const afterPrefix = result.replace(/^[A-Fa-f0-9][\.\:\)]\s*/, "");
+      if (afterPrefix.trim().length > 0) {
+        result = afterPrefix;
+      }
+    }
+    return result.trim();
   }
 
   /**
@@ -459,7 +699,7 @@
         return ["div", "li", "button", "label", "a", "span"].includes(tag) && !["hr", "br", "script", "style"].includes(tag);
       });
 
-      if (validChildren.length < 2 || validChildren.length > 6) continue;
+      if (validChildren.length < 2 || validChildren.length > 16) continue;
 
       // Disqualify immediately if ANY candidate child is or contains an action button or footer
       const hasActionChild = validChildren.some(c => containsActionButtonOrFooter(c));
@@ -682,14 +922,25 @@
       }
     }
 
-    return (finalElements.length >= 2 && finalElements.length <= 6) ? finalElements : withoutContainers;
+    return (finalElements.length >= 2 && finalElements.length <= 16) ? finalElements : withoutContainers;
+  }
+
+  function unwrapOptionElements(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map(ref => {
+        const el = ref && typeof ref.deref === "function" ? ref.deref() : ref;
+        const isStrictlyConnected = Boolean(el && (el.nodeType === 1 || el.nodeType === undefined) && (el.isConnected === true || (typeof el.isConnected === "undefined" && (!el.ownerDocument || (el.ownerDocument.contains && el.ownerDocument.contains(el))))));
+        return isStrictlyConnected ? el : null;
+      })
+      .filter(Boolean);
   }
 
   /**
    * Finds option elements using custom selector or deterministic heuristics.
    * Excludes header/nav text and explanation boxes matching extractor.js rules.
    */
-  function findOptionElements(customSelector, optionSelectors) {
+  function findOptionElements(customSelector, optionSelectors, ignoreCache = false) {
     const doc = (typeof document !== "undefined") ? document : null;
 
     // 0. Deterministic optionSelectors locator metadata from extractor
@@ -704,20 +955,23 @@
     }
 
     // 1. Direct memory parity with extractor.js if extracted in the same world (zero DOM mutation)
-    if (!customSelector && typeof window !== "undefined" && Array.isArray(window.__QUIZZY_LAST_OPTION_ELEMENTS__) && window.__QUIZZY_LAST_OPTION_ELEMENTS__.length >= 2) {
-      const allConnected = window.__QUIZZY_LAST_OPTION_ELEMENTS__.every(el => el && el.isConnected !== false);
+    const savedOptionElements = (!ignoreCache && typeof window !== "undefined" && Array.isArray(window.__QUIZZY_LAST_OPTION_ELEMENTS__))
+      ? unwrapOptionElements(window.__QUIZZY_LAST_OPTION_ELEMENTS__)
+      : [];
+    if (!ignoreCache && !customSelector && savedOptionElements.length >= 2) {
+      const allConnected = savedOptionElements.every(el => el && (el.nodeType === 1 || el.nodeType === undefined) && (el.isConnected === true || (typeof el.isConnected === "undefined" && (!el.ownerDocument || (el.ownerDocument.contains && el.ownerDocument.contains(el))))));
       if (allConnected) {
-        if (Array.isArray(window.__QUIZZY_LAST_OPTIONS_TEXT__) && window.__QUIZZY_LAST_OPTIONS_TEXT__.length === window.__QUIZZY_LAST_OPTION_ELEMENTS__.length) {
-          const textMatches = window.__QUIZZY_LAST_OPTION_ELEMENTS__.every((el, i) => {
+        if (Array.isArray(window.__QUIZZY_LAST_OPTIONS_TEXT__) && window.__QUIZZY_LAST_OPTIONS_TEXT__.length === savedOptionElements.length) {
+          const textMatches = savedOptionElements.every((el, i) => {
             const currentText = cleanText(getCleanVisibleText ? getCleanVisibleText(el) : (el.innerText || el.textContent || ""));
             const expectedText = cleanText(window.__QUIZZY_LAST_OPTIONS_TEXT__[i]);
             return currentText === expectedText || currentText.includes(expectedText) || expectedText.includes(currentText);
           });
           if (textMatches) {
-            return deduplicateOptionElements(window.__QUIZZY_LAST_OPTION_ELEMENTS__);
+            return deduplicateOptionElements(savedOptionElements);
           }
         } else {
-          return deduplicateOptionElements(window.__QUIZZY_LAST_OPTION_ELEMENTS__);
+          return deduplicateOptionElements(savedOptionElements);
         }
       }
     }
@@ -732,13 +986,13 @@
       if (deduped.length >= 2) return deduped;
     }
 
-    // Check for radio button groups (supporting CSS-hidden radio inputs with visible labels)
-    const allRadios = Array.from(doc.querySelectorAll("input[type='radio']")).filter(r => !isInsideCodeEditor(r));
+    // Check for radio button or checkbox groups (supporting CSS-hidden inputs with visible labels)
+    const allRadios = Array.from(doc.querySelectorAll("input[type='radio'], input[type='checkbox']")).filter(r => !isInsideCodeEditor(r));
     const radioRows = [];
     for (const r of allRadios) {
       if (isQuizZyInternalElement(r)) continue;
       const lbl = (typeof r.closest === "function" ? r.closest("label") : null) || (r.id && typeof doc.querySelector === "function" ? doc.querySelector(`label[for="${r.id}"]`) : null);
-      const row = lbl || (typeof r.closest === "function" ? r.closest("[class*='option'], [class*='choice'], [class*='radio'], li, tr") : null) || r.parentElement || r;
+      const row = lbl || (typeof r.closest === "function" ? r.closest("[class*='option'], [class*='choice'], [class*='radio'], [class*='checkbox'], li, tr") : null) || r.parentElement || r;
       if (!row || isQuizZyInternalElement(row)) continue;
       if (isRadioOrOptionVisible(r, row)) {
         if (!isExplanationOrFeedback(row) && !isHeaderOrNavText(cleanText((row.innerText || row.textContent || "")))) {
@@ -747,7 +1001,7 @@
       }
     }
     const dedupedRadios = deduplicateOptionElements(radioRows);
-    if (dedupedRadios.length >= 2 && dedupedRadios.length <= 10) {
+    if (dedupedRadios.length >= 2 && dedupedRadios.length <= 16) {
       return dedupedRadios;
     }
 
@@ -759,7 +1013,11 @@
       "[draggable='true']",
       "[role='option']",
       "[role='radio']",
+      "[role='checkbox']",
       "[class*='radio-item']",
+      "[class*='checkbox-item']",
+      "[class*='checkboxItem']",
+      "[class*='multi-option']",
       "[class*='option-item']",
       ".quiz-choice",
       ".option-card",
@@ -773,7 +1031,7 @@
         .filter(isVisible)
         .filter((el) => !isInsideCodeEditor(el) && !isExplanationOrFeedback(el) && !isHeaderOrNavText(cleanText(el.innerText || el.textContent || "")));
       const deduped = deduplicateOptionElements(matches);
-      if (deduped.length >= 2 && deduped.length <= 10) {
+      if (deduped.length >= 2 && deduped.length <= 16) {
         return deduped;
       }
     }
@@ -818,7 +1076,7 @@
         if (containedCount >= 2) break;
       } else {
         const children = Array.from(parent.children || []).filter(c => isVisible(c) && !isQuizZyInternalElement(c));
-        if (children.length >= 2 && children.length <= 6 && children.includes(curr)) {
+        if (children.length >= 2 && children.length <= 16 && children.includes(curr)) {
           break;
         }
       }
@@ -951,6 +1209,15 @@
       } catch (_) {}
     });
 
+    const isInput = el.tagName === "INPUT";
+    const inputType = isInput ? String(el.type || "").toLowerCase() : "";
+    const prevChecked = isInput ? Boolean(el.checked) : false;
+    let changeFiredByClick = false;
+    const onNativeChange = () => { changeFiredByClick = true; };
+    if (isInput && typeof el.addEventListener === "function") {
+      try { el.addEventListener("change", onNativeChange, { once: true }); } catch (_) {}
+    }
+
     // Native .click() or click event dispatch
     if (bubbles && typeof el.click === "function") {
       try {
@@ -965,16 +1232,146 @@
       } catch (_) {}
     }
 
-    // If input element, dispatch input & change
-    if (el.tagName === "INPUT") {
+    if (isInput && typeof el.removeEventListener === "function") {
+      try { el.removeEventListener("change", onNativeChange); } catch (_) {}
+    }
+
+    // If input element and native .click() did not already toggle/fire change (e.g. non-browser mock DOM), toggle & dispatch
+    if (isInput) {
       try {
-        if (!el.checked) el.checked = true;
-        el.dispatchEvent(new Event("input", { bubbles: !!bubbles, cancelable: true }));
-        el.dispatchEvent(new Event("change", { bubbles: !!bubbles, cancelable: true }));
+        if (inputType === "checkbox") {
+          if (el.checked === prevChecked && !changeFiredByClick) {
+            el.checked = !prevChecked;
+          }
+        } else if (!el.checked) {
+          el.checked = true;
+        }
+        if (!changeFiredByClick) {
+          el.dispatchEvent(new Event("input", { bubbles: !!bubbles, cancelable: true }));
+          el.dispatchEvent(new Event("change", { bubbles: !!bubbles, cancelable: true }));
+        }
       } catch (_) {}
     }
 
     return true;
+  }
+
+  /**
+   * Helper: Locate all native input controls associated with an option element,
+   * including descendants, label[for] targets, and lone sibling inputs.
+   */
+  function findAssociatedInputs(optionEl, docRef) {
+    if (!optionEl) return [];
+    const doc = docRef || (optionEl ? optionEl.ownerDocument : null) || (typeof document !== "undefined" ? document : null);
+    const inputs = [];
+    const seen = new Set();
+    const addInput = (inp) => {
+      if (inp && inp.tagName === "INPUT" && ["radio", "checkbox"].includes((inp.type || "").toLowerCase()) && !seen.has(inp)) {
+        seen.add(inp);
+        inputs.push(inp);
+      }
+    };
+    if (optionEl.tagName === "INPUT") addInput(optionEl);
+    if (optionEl.querySelectorAll) {
+      optionEl.querySelectorAll("input[type='radio'], input[type='checkbox']").forEach(addInput);
+    }
+    const lbl = (optionEl.tagName === "LABEL") ? optionEl : (optionEl.closest ? optionEl.closest("label") : null);
+    if (lbl && lbl.getAttribute && lbl.getAttribute("for") && doc && doc.getElementById) {
+      const targetInput = doc.getElementById(lbl.getAttribute("for"));
+      if (targetInput) addInput(targetInput);
+    }
+    if (inputs.length === 0 && optionEl.parentElement) {
+      const parentInputs = optionEl.parentElement.querySelectorAll ? Array.from(optionEl.parentElement.querySelectorAll("input[type='radio'], input[type='checkbox']")) : [];
+      if (parentInputs.length === 1) {
+        addInput(parentInputs[0]);
+      }
+    }
+    return inputs;
+  }
+
+  /**
+   * Helper: Locate checkbox/radio indicator box within an option element.
+   * Handles semantic inputs, ARIA checkboxes, SVG/img checkmarks, and styled-components square boxes.
+   */
+  function findCheckboxIndicatorElement(optionEl) {
+    if (!optionEl || typeof optionEl.querySelector !== "function") return null;
+
+    // 1. Explicit native input or checkbox role/class
+    const explicit = optionEl.querySelector(
+      "input[type='checkbox'], input[type='radio'], [role='checkbox'], [role='radio'], " +
+      "[class*='checkbox' i], [class*='check' i], [class*='indicator' i], [class*='box' i], [class*='control' i]"
+    );
+    if (explicit) return explicit;
+
+    // 2. SVG or checkmark image container
+    const svgEl = optionEl.querySelector("svg, img[src*='check' i], img[src*='tick' i], [data-icon*='check' i]");
+    if (svgEl) {
+      if (svgEl.parentElement && svgEl.parentElement !== optionEl) return svgEl.parentElement;
+      return svgEl;
+    }
+
+    // 3. First child element in flex option row (styled-components checkbox box on learning.ccbp.in)
+    if (optionEl.children && optionEl.children.length > 0) {
+      const first = optionEl.children[0];
+      if (first) {
+        if (first.children && first.children.length === 1 && first.firstElementChild) {
+          return first.firstElementChild;
+        }
+        return first;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Evaluates if a checkbox indicator element has an active colored fill (e.g. blue, green).
+   */
+  function isIndicatorFilled(el) {
+    if (!el || typeof window === "undefined" || typeof window.getComputedStyle !== "function") return false;
+    try {
+      const cs = window.getComputedStyle(el);
+      if (!cs) return false;
+      const bg = String(cs.backgroundColor || "").replace(/\s+/g, "").toLowerCase();
+      if (!bg || bg === "transparent" || bg === "rgba(0,0,0,0)") return false;
+      if (bg === "rgb(255,255,255)" || bg === "rgba(255,255,255,1)" || bg === "#fff" || bg === "#ffffff") return false;
+
+      const rgbMatch = bg.match(/rgba?\((\d+),(\d+),(\d+)(?:,([\d\.]+))?\)/);
+      if (rgbMatch) {
+        const r = parseInt(rgbMatch[1], 10);
+        const g = parseInt(rgbMatch[2], 10);
+        const b = parseInt(rgbMatch[3], 10);
+        const a = rgbMatch[4] !== undefined ? parseFloat(rgbMatch[4]) : 1.0;
+        if (a < 0.1) return false;
+        if (r > 238 && g > 238 && b > 238) return false; // white or very light gray
+        return true;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Evaluates if an option element or indicator contains a visible checkmark icon or SVG.
+   */
+  function hasCheckmarkVisual(el) {
+    if (!el || typeof el.querySelector !== "function") return false;
+    const svgs = el.querySelectorAll ? el.querySelectorAll("svg") : [];
+    if (svgs && svgs.length > 0) {
+      for (const s of svgs) {
+        if (s && (s.tagName || "").toLowerCase() === "svg" && isVisible(s)) return true;
+      }
+    }
+    const imgs = el.querySelectorAll ? el.querySelectorAll("img[src*='check' i], img[src*='tick' i], [data-icon*='check' i], [class*='checkmark' i]") : [];
+    if (imgs && imgs.length > 0) {
+      for (const m of imgs) {
+        const tag = (m && m.tagName || "").toLowerCase();
+        const cls = String((m && m.className) || "").toLowerCase();
+        if ((tag === "img" || cls.includes("checkmark")) && isVisible(m)) return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -986,15 +1383,14 @@
     if (!optionEl) return null;
 
     let inputsChecked = false;
-    const inputs = optionEl.querySelectorAll ? Array.from(optionEl.querySelectorAll("input[type='radio'], input[type='checkbox']")) : [];
-    if (optionEl.tagName === "INPUT") inputs.push(optionEl);
+    const inputs = findAssociatedInputs(optionEl, doc);
     inputsChecked = inputs.some(i => i.checked === true);
+
+    const indicatorEl = findCheckboxIndicatorElement(optionEl);
 
     const classes = [optionEl.className || ""];
     if (optionEl.parentElement) classes.push(optionEl.parentElement.className || "");
-    if (optionEl.querySelectorAll) {
-      optionEl.querySelectorAll("*").forEach(c => classes.push(c.className || ""));
-    }
+    if (indicatorEl && indicatorEl.className) classes.push(indicatorEl.className || "");
     const classNames = classes.join(" ");
 
     const aria = [
@@ -1002,6 +1398,9 @@
     ];
     if (optionEl.parentElement && optionEl.parentElement.getAttribute) {
       aria.push(optionEl.parentElement.getAttribute("aria-checked") || optionEl.parentElement.getAttribute("aria-selected") || optionEl.parentElement.getAttribute("data-state") || "");
+    }
+    if (indicatorEl && indicatorEl.getAttribute) {
+      aria.push(indicatorEl.getAttribute("aria-checked") || indicatorEl.getAttribute("aria-selected") || indicatorEl.getAttribute("data-state") || "");
     }
     if (optionEl.querySelectorAll) {
       optionEl.querySelectorAll("[aria-checked], [aria-selected], [data-state]").forEach(c => {
@@ -1020,18 +1419,39 @@
       }
     }
 
+    function getCoreStylesFor(node) {
+      if (!node || node.nodeType !== 1) return "";
+      try {
+        const cs = window.getComputedStyle(node);
+        if (!cs) return "";
+        return `${cs.backgroundColor || ""}|${cs.borderColor || ""}|${cs.color || ""}`;
+      } catch (_) {
+        return "";
+      }
+    }
+
     let styles = "";
+    let coreStyles = "";
+    let indicatorBg = "";
+    let indicatorBorder = "";
     if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
       try {
         styles = `row:${getStylesFor(optionEl)}`;
+        coreStyles = `row:${getCoreStylesFor(optionEl)}`;
         if (optionEl.parentElement) {
           styles += `::parent:${getStylesFor(optionEl.parentElement)}`;
+          coreStyles += `::parent:${getCoreStylesFor(optionEl.parentElement)}`;
         }
-        if (optionEl.querySelectorAll) {
-          optionEl.querySelectorAll("*").forEach((c, idx) => {
-            const st = getStylesFor(c);
-            if (st && st !== "||||") styles += `::d${idx}:${st}`;
-          });
+        if (indicatorEl) {
+          const st = getStylesFor(indicatorEl);
+          if (st && st !== "||||") styles += `::indicator:${st}`;
+          const cst = getCoreStylesFor(indicatorEl);
+          if (cst && cst !== "||") coreStyles += `::indicator:${cst}`;
+          const indCs = window.getComputedStyle(indicatorEl);
+          if (indCs) {
+            indicatorBg = indCs.backgroundColor || "";
+            indicatorBorder = indCs.borderColor || "";
+          }
         }
       } catch (_) {}
     }
@@ -1044,9 +1464,21 @@
       }
     }
 
-    const htmlLength = (optionEl.innerHTML || "").length;
+    const hasSvg = hasCheckmarkVisual(optionEl);
+    const svgCount = optionEl.querySelectorAll ? optionEl.querySelectorAll("svg, img").length : 0;
 
-    return { inputsChecked, classNames, aria: aria.join("|"), styles, submitDisabled, htmlLength };
+    return {
+      inputsChecked,
+      classNames,
+      aria: aria.join(" "),
+      styles,
+      coreStyles,
+      indicatorBg,
+      indicatorBorder,
+      hasSvg,
+      svgCount,
+      submitDisabled
+    };
   }
 
   const captureOptionSnapshot = capturePreClickSnapshot;
@@ -1064,11 +1496,8 @@
     if (!optionEl) return false;
     const doc = docRef || (optionEl ? optionEl.ownerDocument : null) || (typeof document !== "undefined" ? document : null);
 
-    // a) A nested <input type="radio"|"checkbox"> has .checked === true
-    const inputs = optionEl.querySelectorAll ? Array.from(optionEl.querySelectorAll("input[type='radio'], input[type='checkbox']")) : [];
-    if (optionEl.tagName === "INPUT" && ["radio", "checkbox"].includes((optionEl.type || "").toLowerCase())) {
-      inputs.push(optionEl);
-    }
+    // a) A nested or associated <input type="radio"|"checkbox"> has .checked === true
+    const inputs = findAssociatedInputs(optionEl, doc);
     if (inputs.some(i => i.checked === true)) {
       return true;
     }
@@ -1085,18 +1514,27 @@
       ariaChecks.push(optionEl.parentElement.getAttribute ? optionEl.parentElement.getAttribute("data-state") : null);
     }
     if (optionEl.querySelectorAll) {
-      optionEl.querySelectorAll("[aria-checked='true'], [aria-selected='true'], [data-state='checked']").forEach(() => ariaChecks.push("true"));
+      optionEl.querySelectorAll("[aria-checked='true'], [aria-selected='true'], [data-state='checked']").forEach((c) => {
+        if (c && typeof c.getAttribute === "function") {
+          if (
+            c.getAttribute("aria-checked") === "true" ||
+            c.getAttribute("aria-selected") === "true" ||
+            c.getAttribute("data-state") === "checked"
+          ) {
+            ariaChecks.push("true");
+          }
+        }
+      });
     }
     if (ariaChecks.some(a => a === "true" || a === "checked")) {
       return true;
     }
 
-    // c) optionEl's className or a child's/parent's className changed compared to preClickSnapshot
+    // c) optionEl's className or indicator's/parent's className changed compared to preClickSnapshot
     const currClasses = [optionEl.className || ""];
     if (optionEl.parentElement) currClasses.push(optionEl.parentElement.className || "");
-    if (optionEl.querySelectorAll) {
-      optionEl.querySelectorAll("*").forEach(c => currClasses.push(c.className || ""));
-    }
+    const curIndicatorEl = optionEl.querySelector ? optionEl.querySelector("input, [class*='radio'], [class*='circle'], [class*='check'], [class*='indicator'], svg") : null;
+    if (curIndicatorEl && curIndicatorEl.className) currClasses.push(curIndicatorEl.className || "");
     const currClassNames = currClasses.join(" ");
     if (preClickSnapshot && currClassNames !== preClickSnapshot.classNames) {
       return true;
@@ -1105,7 +1543,7 @@
       return true;
     }
 
-    // d) optionEl's, child's, or parent's computed styles changed compared to preClickSnapshot
+    // d) optionEl's, indicator's, or parent's computed styles changed compared to preClickSnapshot
     if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
       try {
         function getStylesFor(node) {
@@ -1123,11 +1561,9 @@
         if (optionEl.parentElement) {
           currStyles += `::parent:${getStylesFor(optionEl.parentElement)}`;
         }
-        if (optionEl.querySelectorAll) {
-          optionEl.querySelectorAll("*").forEach((c, idx) => {
-            const st = getStylesFor(c);
-            if (st && st !== "||||") currStyles += `::d${idx}:${st}`;
-          });
+        if (curIndicatorEl) {
+          const st = getStylesFor(curIndicatorEl);
+          if (st && st !== "||||") currStyles += `::indicator:${st}`;
         }
         if (preClickSnapshot && preClickSnapshot.styles && currStyles !== preClickSnapshot.styles) {
           return true;
@@ -1165,8 +1601,10 @@
    *    c) The primary text child element
    * 4. Updates controlled <input type="radio"> via HTMLInputElement.prototype descriptor if present.
    */
-  function triggerReactSelection(optionEl) {
+  function triggerReactSelection(optionEl, options = {}) {
     if (!optionEl) return false;
+    const isCheckbox = Boolean(options && options.isCheckbox);
+    const allOptions = Array.isArray(options && options.allOptions) ? options.allOptions : [];
 
     // 1. Scroll optionEl smoothly into view
     try {
@@ -1176,16 +1614,22 @@
     } catch (_) {}
 
     // 2. Locate row container and candidate targets
-    const { rowEl, candidates } = resolveOptionRowAndTargets(optionEl);
+    const { rowEl, candidates } = resolveOptionRowAndTargets(optionEl, allOptions);
     const win = (typeof window !== "undefined") ? window : null;
     const doc = (typeof document !== "undefined") ? document : (optionEl.ownerDocument || null);
 
     // 3. Case 1: Standard or Sibling <input type="radio" | "checkbox"> / <label> exists inside rowEl
     let inputEl = null;
-    if (rowEl.tagName === "INPUT" && ["radio", "checkbox"].includes((rowEl.type || "").toLowerCase())) {
+    const associated = findAssociatedInputs(optionEl, doc);
+    if (associated.length > 0) {
+      inputEl = associated[0];
+    } else if (rowEl.tagName === "INPUT" && ["radio", "checkbox"].includes((rowEl.type || "").toLowerCase())) {
       inputEl = rowEl;
     } else if (rowEl.querySelector) {
-      inputEl = rowEl.querySelector("input[type='radio'], input[type='checkbox']");
+      const candidateInput = rowEl.querySelector("input[type='radio'], input[type='checkbox']");
+      if (candidateInput && (candidateInput.tagName || "").toLowerCase() === "input") {
+        inputEl = candidateInput;
+      }
     }
 
     let labelEl = null;
@@ -1194,7 +1638,10 @@
     } else if (rowEl.closest && rowEl.closest("label")) {
       labelEl = rowEl.closest("label");
     } else if (rowEl.querySelector) {
-      labelEl = rowEl.querySelector("label");
+      const candidateLabel = rowEl.querySelector("label");
+      if (candidateLabel && (candidateLabel.tagName || "").toLowerCase() === "label") {
+        labelEl = candidateLabel;
+      }
     }
 
     if (!inputEl && labelEl && labelEl.getAttribute && labelEl.getAttribute("for") && doc && doc.getElementById) {
@@ -1205,6 +1652,14 @@
     }
 
     if (inputEl || labelEl) {
+      if (isCheckbox) {
+        if (labelEl) {
+          dispatchRealisticClick(labelEl, true);
+        } else if (inputEl) {
+          dispatchRealisticClick(inputEl, true);
+        }
+        return true;
+      }
       if (labelEl) {
         dispatchRealisticClick(labelEl, true);
       }
@@ -1237,12 +1692,15 @@
 
     // 4. Custom React Option Row:
     const beforeSnapshot = capturePreClickSnapshot(rowEl);
-    if (beforeSnapshot && (beforeSnapshot.inputsChecked || beforeSnapshot.aria === "true")) {
+    if (!isCheckbox && beforeSnapshot && (beforeSnapshot.inputsChecked || beforeSnapshot.aria === "true")) {
       return true;
     }
 
     // Step A: Dispatch cascade across resolved rowEl itself
     dispatchRealisticClick(rowEl, true);
+    if (isCheckbox) {
+      return true;
+    }
     if (verifyOptionSelected(rowEl, [], beforeSnapshot)) {
       return true;
     }
@@ -1335,36 +1793,51 @@
       targetIndex = payload.selected_index;
     }
 
-    // Check if payload.letter, payload.canonical_key, or payload.answer is a single synthetic letter "A"–"F"
+    // Check if payload.letter, payload.canonical_key, or payload.answer is a single synthetic letter "A"–"P"
     let syntheticLetter = "";
-    if (payload && typeof payload.letter === "string" && /^[A-F]$/i.test(payload.letter.trim())) {
+    if (payload && typeof payload.letter === "string" && /^[A-P]$/i.test(payload.letter.trim())) {
       syntheticLetter = payload.letter.trim().toUpperCase();
-    } else if (payload && typeof payload.canonical_key === "string" && /^[A-F]$/i.test(payload.canonical_key.trim())) {
+    } else if (payload && typeof payload.canonical_key === "string" && /^[A-P]$/i.test(payload.canonical_key.trim())) {
       syntheticLetter = payload.canonical_key.trim().toUpperCase();
-    } else if (payload && typeof payload.answer === "string" && /^[A-F]$/i.test(payload.answer.trim())) {
+    } else if (payload && typeof payload.answer === "string" && /^[A-P]$/i.test(payload.answer.trim())) {
       syntheticLetter = payload.answer.trim().toUpperCase();
     }
 
-    // If targetIndex is not explicitly set, convert single letter "A"–"F" to 0–5 index
+    // If targetIndex is not explicitly set, convert single letter "A"–"P" to 0–15 index
     if (targetIndex === null && syntheticLetter) {
       targetIndex = syntheticLetter.charCodeAt(0) - 65;
     }
 
-    // Never try to text-match a single synthetic letter "A"–"F" against full option strings!
+    // Never try to text-match a single synthetic letter "A"–"P" against full option strings!
     let rawTargetText = (payload && (payload.targetText || payload.selected_text)) || null;
-    if (!rawTargetText && payload && payload.answer && !/^[A-F]$/i.test(String(payload.answer).trim())) {
+    if (!rawTargetText && payload && payload.answer && !/^[A-P]$/i.test(String(payload.answer).trim())) {
       rawTargetText = payload.answer;
     }
 
     // Clean text representations of all options using 1:1 extractor-identical logic
     const optionCleanTexts = options.map((optEl) => {
-      const hasCode = !!(optEl.querySelector && optEl.querySelector("pre, code")) || (optEl.tagName && ["pre", "code"].includes(optEl.tagName.toLowerCase()));
+      const hasCode = !!(optEl.querySelector && optEl.querySelector("pre, code, .ace_editor, .monaco-editor, [class*='code']")) || (optEl.tagName && ["pre", "code"].includes(optEl.tagName.toLowerCase()));
+      if (hasCode && typeof extractCleanCodeFromClonedNode === "function") {
+        const c = extractCleanCodeFromClonedNode(optEl, true);
+        if (c) return c;
+      }
       const raw = getCleanVisibleText(optEl, hasCode);
       return normalizeOptionWhitespace(raw, hasCode);
     });
 
-    const targetHasCode = rawTargetText ? (rawTargetText.includes("\n") || /^\s*(def|class|import|return|for|while|if|else|print)\b/.test(rawTargetText)) : false;
+    const targetHasCode = rawTargetText ? (rawTargetText.includes("\n") || /^\s*(def|class|import|return|for|while|if|else|print|select|insert|update|delete|create)\b/i.test(rawTargetText)) : false;
     const cleanTargetText = rawTargetText ? normalizeOptionWhitespace(rawTargetText, targetHasCode) : null;
+
+    const normalizeCodeForMatch = (t) => {
+      if (!t) return "";
+      return String(t)
+        .replace(/^(?:JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH)\s+/i, "")
+        .replace(/^\s*\d{1,4}\s*[:\|\.]?\s+/gm, "")
+        .replace(/^[A-P][\.\:\)\-\s]+\s*/i, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+    };
 
     // 1. Exact normalized text match (cleanOptText === cleanTargetText)
     if (cleanTargetText) {
@@ -1372,22 +1845,24 @@
       if (exactIdx !== -1) {
         targetIndex = exactIdx;
       } else {
-        // 2. Case-insensitive normalized text match
-        const ciIdx = optionCleanTexts.findIndex((optText) => {
+        // 2. Code-aware or case-insensitive normalized text match
+        const normTarget = normalizeCodeForMatch(cleanTargetText);
+        const codeIdx = optionCleanTexts.findIndex((optText) => {
           if (!optText) return false;
+          if (normalizeCodeForMatch(optText) === normTarget) return true;
           if (!targetHasCode && !optText.includes("\n")) {
             return optText.toLowerCase() === cleanTargetText.toLowerCase();
           }
           return false;
         });
-        if (ciIdx !== -1) {
-          targetIndex = ciIdx;
+        if (codeIdx !== -1) {
+          targetIndex = codeIdx;
         }
       }
     }
 
-    // 2.5 Single letter fallback if cleanTargetText is "A"–"F" and targetIndex unresolved
-    if ((targetIndex === null || targetIndex === undefined) && cleanTargetText && /^[A-F]$/i.test(cleanTargetText.trim())) {
+    // 2.5 Single letter fallback if cleanTargetText is "A"–"P" and targetIndex unresolved
+    if ((targetIndex === null || targetIndex === undefined) && cleanTargetText && /^[A-P]$/i.test(cleanTargetText.trim())) {
       const allMultiChar = optionCleanTexts.every(t => !t || t.trim().length > 1);
       if (allMultiChar) {
         targetIndex = cleanTargetText.trim().toUpperCase().charCodeAt(0) - 65;
@@ -1423,16 +1898,34 @@
 
     // Retry on unverified selection: targeted inner child click + elementFromPoint
     if (!selected) {
-      const innerTarget = targetEl.firstElementChild || (targetEl.querySelector ? targetEl.querySelector("input, label, span, div") : null) || targetEl;
+      // For code-based option cards, prioritize outer selectable wrapper, radio/checkbox input, or label
+      // instead of clicking inside <pre> scrollbar where clicks are ignored by React
+      let innerTarget = null;
+      if (targetEl.querySelector) {
+        innerTarget = targetEl.querySelector("input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox'], label, [class*='radio'], [class*='checkbox'], [class*='indicator'], [class*='badge']");
+      }
+      if (!innerTarget) {
+        innerTarget = targetEl.firstElementChild || targetEl;
+      }
+      const innerTag = (innerTarget.tagName || "").toLowerCase();
+      if (innerTag === "pre" || innerTag === "code" || (innerTarget.className && typeof innerTarget.className === "string" && innerTarget.className.includes("editor"))) {
+        innerTarget = targetEl;
+      }
       dispatchRealisticClick(innerTarget, true);
 
       if (doc && typeof doc.elementFromPoint === "function" && typeof targetEl.getBoundingClientRect === "function") {
         try {
           const rect = targetEl.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
-            const pointEl = doc.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            // Click near top-left badge/indicator rather than center which may land on code pre/scrollbar
+            const clickX = rect.left + Math.min(24, Math.max(8, rect.width / 6));
+            const clickY = rect.top + Math.min(24, Math.max(8, rect.height / 4));
+            const pointEl = doc.elementFromPoint(clickX, clickY);
             if (pointEl && pointEl !== targetEl) {
-              dispatchRealisticClick(pointEl, true);
+              const pTag = (pointEl.tagName || "").toLowerCase();
+              if (pTag !== "pre" && pTag !== "code") {
+                dispatchRealisticClick(pointEl, true);
+              }
             }
           }
         } catch (_) {}
@@ -1470,10 +1963,107 @@
 
   /**
    * Evaluates if a given option element or checkbox is currently checked.
-   * Inspects native checkbox inputs, ARIA attributes, SVG checkmarks, and styling.
+   * Inspects native checkbox inputs, ARIA attributes, SVG checkmarks, styling, and pre-click snapshot diffs.
    */
-  function isOptionChecked(optionEl) {
+  function isOptionChecked(optionEl, preClickSnapshot) {
     if (!optionEl) return false;
+
+    // 1. Native input check
+    const inputs = findAssociatedInputs(optionEl);
+    if (inputs.some(i => i.checked === true || (i.getAttribute && i.getAttribute("checked") !== null))) {
+      return true;
+    }
+
+    const indicator = findCheckboxIndicatorElement(optionEl);
+
+    // 2. ARIA checked / selected / data-state attribute
+    const ariaChecks = [
+      optionEl.getAttribute ? optionEl.getAttribute("aria-checked") : null,
+      optionEl.getAttribute ? optionEl.getAttribute("aria-selected") : null,
+      optionEl.getAttribute ? optionEl.getAttribute("data-state") : null
+    ];
+    if (indicator && indicator.getAttribute) {
+      ariaChecks.push(indicator.getAttribute("aria-checked"));
+      ariaChecks.push(indicator.getAttribute("aria-selected"));
+      ariaChecks.push(indicator.getAttribute("data-state"));
+    }
+    if (optionEl.parentElement && optionEl.parentElement.getAttribute) {
+      ariaChecks.push(optionEl.parentElement.getAttribute("aria-checked"));
+      ariaChecks.push(optionEl.parentElement.getAttribute("aria-selected"));
+      ariaChecks.push(optionEl.parentElement.getAttribute("data-state"));
+    }
+    if (optionEl.querySelectorAll) {
+      optionEl.querySelectorAll("[aria-checked='true'], [aria-selected='true'], [data-state='checked']").forEach((c) => {
+        if (c && typeof c.getAttribute === "function") {
+          const a = c.getAttribute("aria-checked");
+          const s = c.getAttribute("aria-selected");
+          const d = c.getAttribute("data-state");
+          if (a === "true" || a === "checked" || s === "true" || s === "checked" || d === "checked" || d === "true") {
+            ariaChecks.push("true");
+          }
+        }
+      });
+    }
+    if (ariaChecks.some(a => a === "true" || a === "checked")) {
+      return true;
+    }
+
+    // 3. Class names indicating checked/selected state
+    const cls = [optionEl.className || ""];
+    if (optionEl.parentElement) cls.push(optionEl.parentElement.className || "");
+    if (indicator && indicator.className) cls.push(indicator.className || "");
+    const combinedClasses = cls.join(" ");
+    if (/\b(?:checked|is-checked|ant-checkbox-checked|selected|is-selected|selected-row|checked-indicator)\b/i.test(combinedClasses)) {
+      return true;
+    }
+
+    // 4. Inner SVG or image checkmark inside indicator or option row
+    if (hasCheckmarkVisual(optionEl)) {
+      if (!preClickSnapshot || !preClickSnapshot.hasSvg || (optionEl.querySelectorAll ? optionEl.querySelectorAll("svg, img").length : 0) > (preClickSnapshot.svgCount || 0)) {
+        return true;
+      }
+    }
+
+    // 5. Styled-components checkbox indicator fill check (colored fill like blue/green)
+    if (indicator && indicator !== optionEl) {
+      if (isIndicatorFilled(indicator)) {
+        return true;
+      }
+    }
+
+    // 6. Changed class/background-color/border-color compared to preClickSnapshot
+    if (preClickSnapshot) {
+      if (combinedClasses && preClickSnapshot.classNames && combinedClasses.trim() !== preClickSnapshot.classNames.trim()) {
+        return true;
+      }
+      if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+        try {
+          const getCoreStylesFor = (node) => {
+            if (!node || node.nodeType !== 1) return "";
+            const cs = window.getComputedStyle(node);
+            if (!cs) return "";
+            return `${cs.backgroundColor || ""}|${cs.borderColor || ""}|${cs.color || ""}`;
+          };
+          let currCoreStyles = `row:${getCoreStylesFor(optionEl)}`;
+          if (optionEl.parentElement) {
+            currCoreStyles += `::parent:${getCoreStylesFor(optionEl.parentElement)}`;
+          }
+          if (indicator) {
+            const cst = getCoreStylesFor(indicator);
+            if (cst && cst !== "||") currCoreStyles += `::indicator:${cst}`;
+          }
+          if (preClickSnapshot.coreStyles && currCoreStyles !== preClickSnapshot.coreStyles) {
+            if (indicator && preClickSnapshot.indicatorBg) {
+              const currIndBg = window.getComputedStyle(indicator).backgroundColor;
+              if (currIndBg !== preClickSnapshot.indicatorBg && isIndicatorFilled(indicator)) {
+                return true;
+              }
+            }
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
 
     if (typeof window !== "undefined" && window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ === optionEl) {
       return true;
@@ -1481,46 +2071,10 @@
     if (optionEl.getAttribute && optionEl.getAttribute("data-quizzy-selected") === "true") {
       return true;
     }
-
-    // 1. Native input check
-    const inputs = optionEl.querySelectorAll ? Array.from(optionEl.querySelectorAll("input[type='checkbox'], input[type='radio']")) : [];
-    if (optionEl.tagName === "INPUT" && ["checkbox", "radio"].includes((optionEl.type || "").toLowerCase())) {
-      inputs.push(optionEl);
-    }
-    if (inputs.some(i => i.checked === true)) {
+    if (optionEl.querySelector && optionEl.querySelector("[data-quizzy-selected='true']")) {
       return true;
     }
-
-    // 2. ARIA checked / selected attribute
-    const ariaChecks = [
-      optionEl.getAttribute ? optionEl.getAttribute("aria-checked") : null,
-      optionEl.getAttribute ? optionEl.getAttribute("aria-selected") : null,
-      optionEl.getAttribute ? optionEl.getAttribute("data-state") : null
-    ];
-    if (optionEl.parentElement) {
-      ariaChecks.push(optionEl.parentElement.getAttribute ? optionEl.parentElement.getAttribute("aria-checked") : null);
-      ariaChecks.push(optionEl.parentElement.getAttribute ? optionEl.parentElement.getAttribute("data-state") : null);
-    }
-    if (optionEl.querySelectorAll) {
-      optionEl.querySelectorAll("[aria-checked='true'], [aria-selected='true'], [data-state='checked']").forEach(() => ariaChecks.push("true"));
-    }
-    if (ariaChecks.some(a => a === "true" || a === "checked")) {
-      return true;
-    }
-
-    // 3. Class names indicating checked state
-    const cls = [optionEl.className || ""];
-    if (optionEl.parentElement) cls.push(optionEl.parentElement.className || "");
-    if (optionEl.querySelectorAll) {
-      optionEl.querySelectorAll("*").forEach(c => cls.push(c.className || ""));
-    }
-    const combinedClasses = cls.join(" ");
-    if (/\b(?:checked|is-checked|ant-checkbox-checked|selected|is-selected)\b/i.test(combinedClasses)) {
-      return true;
-    }
-
-    // 4. Inner SVG or pseudo-element checkmark
-    if (optionEl.querySelector && optionEl.querySelector("svg[data-icon='check'], svg.check-icon, .checkmark, [data-icon='checkmark']")) {
+    if (optionEl.closest && optionEl.closest("[data-quizzy-selected='true']")) {
       return true;
     }
 
@@ -1529,19 +2083,23 @@
 
   /**
    * Executes multi-choice selection with several correct answers (square checkboxes).
-   * Toggles each target option to checked, toggles non-target options to unchecked,
-   * and verifies that every option's checked state matches before returning.
+   * Sequentially clicks each option asynchronously with 110ms React commit delay,
+   * re-resolves live DOM option elements on every step, and verifies all options before returning.
    */
-  function executeMultiMcqAction(payload) {
+  async function executeMultiMcqAction(payload) {
     const doc = (typeof document !== "undefined") ? document : null;
-    const options = findOptionElements(payload ? payload.optionsSelector : null);
+    const options = findOptionElements(payload ? payload.optionsSelector : null, payload ? payload.optionSelectors : null, false);
 
     if (!options || options.length === 0) {
-      return { ok: false, success: false, selected: false, error: "OPTION_SELECTION_FAILED" };
+      return { ok: false, success: false, selected: false, verified: false, error: "OPTION_SELECTION_FAILED" };
     }
 
     const optionCleanTexts = options.map(el => {
-      const hasCode = !!(el.querySelector && el.querySelector("pre, code, .code, .monospace"));
+      const hasCode = !!(el.querySelector && el.querySelector("pre, code, .code, .monospace, .ace_editor, .monaco-editor")) || (el.tagName && ["pre", "code"].includes(el.tagName.toLowerCase()));
+      if (hasCode && typeof extractCleanCodeFromClonedNode === "function") {
+        const c = extractCleanCodeFromClonedNode(el, true);
+        if (c) return c;
+      }
       const rawText = getCleanVisibleText(el, hasCode);
       return normalizeOptionWhitespace(rawText, hasCode);
     });
@@ -1551,7 +2109,7 @@
     const numOptions = options.length;
 
     // Check payload.selected_indices
-    if (Array.isArray(payload.selected_indices)) {
+    if (payload && Array.isArray(payload.selected_indices)) {
       payload.selected_indices.forEach(idx => {
         if (typeof idx === "number" && idx >= 0 && idx < numOptions) {
           targetIndices.add(idx);
@@ -1560,7 +2118,7 @@
     }
 
     // Check payload.canonical_keys (e.g. ["A", "D"])
-    if (Array.isArray(payload.canonical_keys)) {
+    if (payload && Array.isArray(payload.canonical_keys)) {
       payload.canonical_keys.forEach(k => {
         if (typeof k === "string" && /^[A-Z]$/i.test(k.trim())) {
           const idx = k.trim().toUpperCase().charCodeAt(0) - 65;
@@ -1570,7 +2128,7 @@
     }
 
     // Check payload.canonical_key (e.g. "A, D" or "A,D")
-    if (targetIndices.size === 0 && typeof payload.canonical_key === "string") {
+    if (targetIndices.size === 0 && payload && typeof payload.canonical_key === "string") {
       const letters = payload.canonical_key.toUpperCase().match(/[A-Z]/g);
       if (letters) {
         letters.forEach(l => {
@@ -1581,7 +2139,7 @@
     }
 
     // Match payload.selected_texts
-    if (Array.isArray(payload.selected_texts) && payload.selected_texts.length > 0) {
+    if (payload && Array.isArray(payload.selected_texts) && payload.selected_texts.length > 0) {
       payload.selected_texts.forEach(txt => {
         const cleanTxt = cleanText(txt).toLowerCase();
         for (let i = 0; i < optionCleanTexts.length; i++) {
@@ -1594,46 +2152,119 @@
     }
 
     // Fallback: single selected_index
-    if (targetIndices.size === 0 && typeof payload.selected_index === "number" && payload.selected_index >= 0 && payload.selected_index < numOptions) {
+    if (targetIndices.size === 0 && payload && typeof payload.selected_index === "number" && payload.selected_index >= 0 && payload.selected_index < numOptions) {
       targetIndices.add(payload.selected_index);
     }
 
     if (targetIndices.size === 0) {
-      return { ok: false, success: false, selected: false, error: "OPTION_SELECTION_FAILED" };
+      return { ok: false, success: false, selected: false, verified: false, error: "OPTION_SELECTION_FAILED" };
     }
 
-    // 2. Toggle each option to match required state
-    for (let i = 0; i < options.length; i++) {
-      const optEl = options[i];
+    const resolveLiveOptions = () => {
+      let live = findOptionElements(payload ? payload.optionsSelector : null, payload ? payload.optionSelectors : null, true);
+      if (!live || live.length < numOptions) {
+        live = findOptionElements(payload ? payload.optionsSelector : null, payload ? payload.optionSelectors : null, false);
+      }
+      if (live && live.length >= numOptions && typeof window !== "undefined") {
+        window.__QUIZZY_LAST_OPTION_ELEMENTS__ = live.map(el => (typeof WeakRef !== "undefined" ? new WeakRef(el) : el));
+      }
+      return (live && live.length >= numOptions) ? live : options;
+    };
+
+    // 2. Sequential async clicking with live DOM re-resolution on every index
+    const snapshotsByIndex = {};
+    for (let i = 0; i < numOptions; i++) {
+      let liveOptions = resolveLiveOptions();
+      let optEl = liveOptions[i] || options[i];
+      if (!optEl) continue;
+
       const shouldBeChecked = targetIndices.has(i);
-      let isChecked = isOptionChecked(optEl);
+      if (!shouldBeChecked && optEl.removeAttribute) {
+        try { optEl.removeAttribute("data-quizzy-selected"); } catch (_) {}
+      }
+      let currentlyChecked = isOptionChecked(optEl);
 
-      if (isChecked !== shouldBeChecked) {
-        // Attempt toggle via triggerReactSelection
-        triggerReactSelection(optEl);
-        isChecked = isOptionChecked(optEl);
+      if (currentlyChecked !== shouldBeChecked) {
+        const preClickSnapshot = capturePreClickSnapshot(optEl, liveOptions, doc);
+        snapshotsByIndex[i] = preClickSnapshot;
 
-        // If not updated, click inner checkbox element directly
-        if (isChecked !== shouldBeChecked) {
-          const innerClickable = optEl.querySelector ? (optEl.querySelector("input[type='checkbox'], [role='checkbox'], svg, span, div") || optEl) : optEl;
-          dispatchRealisticClick(innerClickable, true);
-          isChecked = isOptionChecked(optEl);
+        // Attempt 1: Trigger React selection on option row
+        triggerReactSelection(optEl, { isCheckbox: true, allOptions: liveOptions });
+
+        // Wait 120ms for React to commit the state update and re-render before verifying or clicking next checkbox
+        await sleepMs(120);
+
+        liveOptions = resolveLiveOptions();
+        optEl = liveOptions[i] || optEl;
+        currentlyChecked = isOptionChecked(optEl, shouldBeChecked ? preClickSnapshot : null);
+
+        // SAFE RETRY: Only if NOT yet toggled, and visually neither checkmark nor active fill appeared
+        if (currentlyChecked !== shouldBeChecked) {
+          const indicator = findCheckboxIndicatorElement(optEl);
+          const hasVisual = hasCheckmarkVisual(optEl) || (indicator && isIndicatorFilled(indicator));
+          if (hasVisual && shouldBeChecked) {
+            currentlyChecked = true;
+          } else {
+            // Click indicator directly as single fallback
+            const innerClickable = indicator || (optEl.querySelector && optEl.querySelector("input[type='checkbox'], [role='checkbox'], label, [class*='box'], [class*='check'], [class*='indicator'], svg, span, div")) || optEl;
+            dispatchRealisticClick(innerClickable, true);
+            await sleepMs(120);
+            liveOptions = resolveLiveOptions();
+            optEl = liveOptions[i] || optEl;
+            currentlyChecked = isOptionChecked(optEl, shouldBeChecked ? preClickSnapshot : null);
+          }
         }
+
+        if (currentlyChecked && shouldBeChecked && optEl && optEl.setAttribute) {
+          try { optEl.setAttribute("data-quizzy-selected", "true"); } catch (_) {}
+        }
+      } else if (currentlyChecked && shouldBeChecked && optEl && optEl.setAttribute) {
+        try { optEl.setAttribute("data-quizzy-selected", "true"); } catch (_) {}
       }
     }
 
-    // Remember last action
-    if (typeof window !== "undefined") {
-      window.__QUIZZY_LAST_ACTION_PAYLOAD__ = payload;
+    // 3. Final verification gate across all options
+    const finalLiveOptions = resolveLiveOptions();
+    const allVerified = Array.from({ length: numOptions }, (_, idx) => {
+      const el = finalLiveOptions[idx] || options[idx];
+      const shouldCheck = targetIndices.has(idx);
+      return isOptionChecked(el, shouldCheck ? snapshotsByIndex[idx] : null) === shouldCheck;
+    }).every(Boolean);
+
+    if (!allVerified) {
+      return {
+        ok: false,
+        success: false,
+        selected: false,
+        verified: false,
+        q_type: "multi",
+        error: "MULTI_OPTION_VERIFICATION_FAILED"
+      };
+    }
+
+    for (let idx = 0; idx < numOptions; idx++) {
+      const el = finalLiveOptions[idx] || options[idx];
+      if (el && el.setAttribute && targetIndices.has(idx)) {
+        try { el.setAttribute("data-quizzy-selected", "true"); } catch (_) {}
+      }
     }
 
     const selectedIdxArr = Array.from(targetIndices).sort((a, b) => a - b);
     const selectedKeys = selectedIdxArr.map(i => String.fromCharCode(65 + i));
 
+    // Remember last action
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_LAST_ACTION_PAYLOAD__ = payload;
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = finalLiveOptions[selectedIdxArr[0]] || options[selectedIdxArr[0]];
+      window.__QUIZZY_LAST_SELECTED_OPTION__ = window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__;
+    }
+
     return {
       ok: true,
       success: true,
       selected: true,
+      verified: true,
+      q_type: "multi",
       action: "multi_mcq_click",
       selected_indices: selectedIdxArr,
       canonical_keys: selectedKeys,
@@ -1688,40 +2319,71 @@
       return { success: false, error: "Target text input element not found on page." };
     }
 
+    const prevVal = String(inputEl.value || "");
     try {
-      inputEl.focus();
+      dispatchRealisticClick(inputEl, true);
+      if (typeof inputEl.focus === "function") inputEl.focus();
     } catch (e) {}
 
-    // Use native prototype property descriptor to bypass React/Vue value interception
-    try {
-      const isTextArea = inputEl.tagName.toLowerCase() === "textarea";
-      const prototype = isTextArea
-        ? window.HTMLTextAreaElement.prototype
-        : window.HTMLInputElement.prototype;
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+    function applyControlledValue(el, val, previousValue) {
+      try {
+        const isTextArea = (el.tagName || "").toLowerCase() === "textarea";
+        const prototype = isTextArea
+          ? (typeof window !== "undefined" && window.HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : null)
+          : (typeof window !== "undefined" && window.HTMLInputElement ? window.HTMLInputElement.prototype : null);
+        const descriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, "value") : null;
 
-      if (descriptor && descriptor.set) {
-        descriptor.set.call(inputEl, textVal);
-      } else {
-        inputEl.value = textVal;
+        if (descriptor && descriptor.set) {
+          descriptor.set.call(el, val);
+        } else {
+          el.value = val;
+        }
+      } catch (e) {
+        el.value = val;
       }
-    } catch (e) {
-      inputEl.value = textVal;
+
+      // Reset React 16-18 _valueTracker so React detects the state transition on input/change dispatch
+      if (el._valueTracker && typeof el._valueTracker.setValue === "function") {
+        try {
+          el._valueTracker.setValue(previousValue);
+        } catch (_) {}
+      }
+
+      try {
+        let inputEv = null;
+        if (typeof InputEvent !== "undefined") {
+          try {
+            inputEv = new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: val });
+          } catch (_) {}
+        }
+        if (!inputEv) {
+          inputEv = new Event("input", { bubbles: true, cancelable: true });
+        }
+        el.dispatchEvent(inputEv);
+        el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+        if (typeof KeyboardEvent !== "undefined") {
+          el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+        }
+      } catch (e) {}
+
+      // Direct React props/fiber onChange invocation fallback for isolated content scripts
+      try {
+        const keys = Object.keys(el);
+        const propsKey = keys.find(k => k.startsWith("__reactProps$") || k.startsWith("__reactEventHandlers$"));
+        if (propsKey && el[propsKey] && typeof el[propsKey].onChange === "function") {
+          el[propsKey].onChange({ target: el, currentTarget: el, type: "change", nativeEvent: new Event("input") });
+        }
+      } catch (_) {}
     }
 
-    // Dispatch input and change events
-    try {
-      inputEl.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
-      inputEl.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
-    } catch (e) {}
+    applyControlledValue(inputEl, textVal, prevVal);
 
     // Pre-submit verification: verify entered answer matches expected response
     const currentVal = cleanText(inputEl.value);
     const expectedVal = cleanText(textVal);
     if (currentVal !== expectedVal) {
-      inputEl.value = textVal;
-      inputEl.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
-      inputEl.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+      applyControlledValue(inputEl, textVal, "");
     }
 
     const verified = (cleanText(inputEl.value) === expectedVal);
@@ -1733,6 +2395,14 @@
         error: "TEXT_VERIFICATION_FAILED",
         reason: `Input value '${inputEl.value}' did not match expected '${textVal}'`
       };
+    }
+
+    if (inputEl.setAttribute) {
+      try { inputEl.setAttribute("data-quizzy-selected", "true"); } catch (_) {}
+    }
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = inputEl;
+      window.__QUIZZY_LAST_SELECTED_OPTION__ = inputEl;
     }
 
     return {
@@ -1797,14 +2467,15 @@
     ].join(", ");
 
     try {
+      if (rowEl.matches && rowEl.matches(explicitSelector)) return rowEl;
       const explicit = rowEl.querySelector(explicitSelector);
       if (explicit) return explicit;
     } catch (_) {}
 
-    // 2. Left-side child box/button/div inside rowEl containing an <svg> (6-dot icon) and no question text
+    // 2. Left-side child/descendant box/button/div inside rowEl containing an <svg> (6-dot icon) and no question text
     try {
-      const children = Array.from(rowEl.children || []);
-      for (const child of children) {
+      const descendants = Array.from(rowEl.querySelectorAll ? rowEl.querySelectorAll("div, span, button, a") : (rowEl.children || []));
+      for (const child of descendants) {
         const svg = child.querySelector ? child.querySelector("svg") : null;
         if (svg) {
           const text = cleanText(child.textContent || "");
@@ -1817,9 +2488,12 @@
 
     // 3. Child with tabIndex === 0 or cursor: grab / move
     try {
-      const allEls = Array.from(rowEl.querySelectorAll("*"));
-      for (const el of allEls) {
-        if (el.tabIndex === 0 && !el.matches("input, textarea, select, button[type='submit']")) {
+      const candidates = Array.from(rowEl.querySelectorAll("div, span, button, svg, [tabindex]"));
+      for (const el of candidates) {
+        if (el.tabIndex === 0 && (!el.matches || !el.matches("input, textarea, select, button[type='submit']"))) {
+          return el;
+        }
+        if (el.style && (el.style.cursor === "grab" || el.style.cursor === "grabbing" || el.style.cursor === "move")) {
           return el;
         }
         if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
@@ -2015,6 +2689,9 @@
         screenY: y,
         button: button,
         buttons: buttons,
+        which: buttons ? 1 : 0,
+        pageX: x + (win ? (win.scrollX || win.pageXOffset || 0) : 0),
+        pageY: y + (win ? (win.scrollY || win.pageYOffset || 0) : 0),
         isPrimary: true,
         pointerId: 1,
         pointerType: "mouse"
@@ -2086,16 +2763,19 @@
     const win = (typeof window !== "undefined") ? window : null;
     if (!doc) return false;
 
+    const targetHandle = findDragHandleInRow(targetRow) || targetRow;
     const r1 = (handleEl.getBoundingClientRect && handleEl.getBoundingClientRect().height > 0)
       ? handleEl.getBoundingClientRect()
       : { left: 100, top: currentIdx * 60, width: 24, height: 24 };
-    const r2 = (targetRow.getBoundingClientRect && targetRow.getBoundingClientRect().height > 0)
-      ? targetRow.getBoundingClientRect()
-      : { left: 100, top: targetPos * 60, width: 300, height: 50 };
+    const r2 = (targetHandle.getBoundingClientRect && targetHandle.getBoundingClientRect().height > 0)
+      ? targetHandle.getBoundingClientRect()
+      : ((targetRow.getBoundingClientRect && targetRow.getBoundingClientRect().height > 0)
+        ? targetRow.getBoundingClientRect()
+        : { left: 100, top: targetPos * 60, width: 300, height: 50 });
 
     const startX = Math.round(r1.left + (r1.width ? r1.width / 2 : 12));
     const startY = Math.round(r1.top + (r1.height ? r1.height / 2 : 12));
-    const endX = Math.round(r2.left + (r2.width ? r2.width / 2 : 150));
+    const endX = startX;
     const direction = targetPos < currentIdx ? -1 : 1;
     // Overshoot slightly past target row's center in drag direction
     const endY = Math.round(r2.top + (r2.height ? r2.height * 0.5 : 25) + (direction * 10));
@@ -2112,6 +2792,9 @@
         screenY: y,
         button: button,
         buttons: buttons,
+        which: buttons ? 1 : 0,
+        pageX: x + (win ? (win.scrollX || win.pageXOffset || 0) : 0),
+        pageY: y + (win ? (win.scrollY || win.pageYOffset || 0) : 0),
         isPrimary: true,
         pointerId: 1,
         pointerType: "mouse"
@@ -2152,53 +2835,45 @@
       dispatchEv("pointerdown", handleEl, startX, startY, 1, 0);
       dispatchEv("mousedown", handleEl, startX, startY, 1, 0);
 
-      // 2. Wait 20ms (requestAnimationFrame paced)
-      await sleepMs(20);
-
-      // 3. Dispatch slop-breaking movement past 5px threshold (8px)
+      // 2. Interpolate 10 smooth movement steps from (startX, startY) to (endX, endY),
+      // beginning with an initial 8px slop-threshold step to activate @dnd-kit / pointer sensors,
+      // spacing steps by 18ms (setTimeout), dispatching both pointermove and mousemove at each coordinate.
+      const numSteps = 10;
       const slopY = startY + (direction * 8);
-      dispatchEv("pointermove", handleEl, startX, slopY, 1, 0);
-      dispatchEv("mousemove", handleEl, startX, slopY, 1, 0);
-      dispatchEv("pointermove", doc, startX, slopY, 1, 0);
-      dispatchEv("mousemove", doc, startX, slopY, 1, 0);
-      if (win) {
-        dispatchEv("pointermove", win, startX, slopY, 1, 0);
-        dispatchEv("mousemove", win, startX, slopY, 1, 0);
-      }
-
-      // 4. Wait 25ms so react-beautiful-dnd / @dnd-kit initializes placeholder
-      await sleepMs(25);
-
-      // 5. Interpolate 6 intermediate steps from startY to endY
-      const numSteps = 6;
       for (let s = 1; s <= numSteps; s++) {
+        await sleepMs(18);
         const frac = s / numSteps;
         const curX = Math.round(startX + (endX - startX) * frac);
-        const curY = Math.round(startY + (endY - startY) * frac);
-        dispatchEv("pointermove", targetRow, curX, curY, 1, 0);
-        dispatchEv("mousemove", targetRow, curX, curY, 1, 0);
+        const curY = s === 1
+          ? slopY
+          : Math.round(slopY + (endY - slopY) * ((s - 1) / (numSteps - 1)));
+        const moveTarget = s === 1 ? handleEl : targetRow;
+        dispatchEv("pointermove", moveTarget, curX, curY, 1, 0);
+        dispatchEv("mousemove", moveTarget, curX, curY, 1, 0);
         dispatchEv("pointermove", doc, curX, curY, 1, 0);
         dispatchEv("mousemove", doc, curX, curY, 1, 0);
         if (win) {
           dispatchEv("pointermove", win, curX, curY, 1, 0);
           dispatchEv("mousemove", win, curX, curY, 1, 0);
         }
-        await sleepMs(20);
       }
 
-      // 6. Release pointerup, mouseup, and click
-      dispatchEv("pointerup", handleEl, startX, endY, 0, 0);
-      dispatchEv("mouseup", handleEl, startX, endY, 0, 0);
-      dispatchEv("pointerup", targetRow, startX, endY, 0, 0);
-      dispatchEv("mouseup", targetRow, startX, endY, 0, 0);
-      dispatchEv("pointerup", doc, startX, endY, 0, 0);
-      dispatchEv("mouseup", doc, startX, endY, 0, 0);
+      // 3. Pause 60ms over the target slot so the drop placeholder settles
+      await sleepMs(60);
+
+      // 4. Release pointerup, mouseup, and click, followed by a 200ms settle delay
+      dispatchEv("pointerup", handleEl, endX, endY, 0, 0);
+      dispatchEv("mouseup", handleEl, endX, endY, 0, 0);
+      dispatchEv("pointerup", targetRow, endX, endY, 0, 0);
+      dispatchEv("mouseup", targetRow, endX, endY, 0, 0);
+      dispatchEv("pointerup", doc, endX, endY, 0, 0);
+      dispatchEv("mouseup", doc, endX, endY, 0, 0);
       if (win) {
-        dispatchEv("pointerup", win, startX, endY, 0, 0);
-        dispatchEv("mouseup", win, startX, endY, 0, 0);
+        dispatchEv("pointerup", win, endX, endY, 0, 0);
+        dispatchEv("mouseup", win, endX, endY, 0, 0);
       }
-      dispatchEv("click", targetRow, startX, endY, 0, 0);
-      await sleepMs(50);
+      dispatchEv("click", targetRow, endX, endY, 0, 0);
+      await sleepMs(200);
       return true;
     } catch (err) {
       console.warn("[QuizZy] Pointer drag error:", err);
@@ -2212,7 +2887,8 @@
   }
 
   /**
-   * Layer 3: Keyboard Sensor Reordering (Space -> ArrowUp/ArrowDown -> Space on handleEl).
+   * Strategy 1: React-Beautiful-DnD / Keyboard Sensor Reordering
+   * (Space -> 70ms -> ArrowUp/ArrowDown with 55ms pause -> 70ms -> Space -> 200ms settle).
    */
   async function simulateHandleKeyboardDrag(handleEl, currentIdx, targetPos) {
     if (!handleEl || currentIdx === targetPos) return false;
@@ -2225,41 +2901,43 @@
       }
     } catch (_) {}
 
-    function key(k, c, code, targetEl) {
+    function dispatchKeyPair(k, c, code, targetEl) {
       const el = targetEl || (doc && doc.activeElement) || handleEl;
       if (!el || typeof el.dispatchEvent !== "function") return;
-      let ev;
-      if (typeof KeyboardEvent !== "undefined") {
-        try {
-          ev = new KeyboardEvent("keydown", {
-            key: k,
-            code: c,
-            keyCode: code,
-            which: code,
-            bubbles: true,
-            cancelable: true,
-            view: win
-          });
-        } catch (_) {}
+      for (const evType of ["keydown", "keyup"]) {
+        let ev;
+        if (typeof KeyboardEvent !== "undefined") {
+          try {
+            ev = new KeyboardEvent(evType, {
+              key: k,
+              code: c,
+              keyCode: code,
+              which: code,
+              bubbles: true,
+              cancelable: true,
+              view: win
+            });
+          } catch (_) {}
+        }
+        if (!ev && typeof CustomEvent !== "undefined") {
+          try {
+            ev = new CustomEvent(evType, { bubbles: true, cancelable: true });
+            ev.key = k;
+            ev.code = c;
+            ev.keyCode = code;
+            ev.which = code;
+          } catch (_) {}
+        }
+        if (!ev) {
+          ev = { type: evType, key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true };
+        }
+        el.dispatchEvent(ev);
       }
-      if (!ev && typeof CustomEvent !== "undefined") {
-        try {
-          ev = new CustomEvent("keydown", { bubbles: true, cancelable: true });
-          ev.key = k;
-          ev.code = c;
-          ev.keyCode = code;
-          ev.which = code;
-        } catch (_) {}
-      }
-      if (!ev) {
-        ev = { type: "keydown", key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true };
-      }
-      el.dispatchEvent(ev);
     }
 
-    // Space keydown to lift item
-    key(" ", "Space", 32, handleEl);
-    await sleepMs(35);
+    // Space keydown/keyup to lift item, wait 70ms for lift state
+    dispatchKeyPair(" ", "Space", 32, handleEl);
+    await sleepMs(70);
 
     const isUp = targetPos < currentIdx;
     const stepKey = isUp ? "ArrowUp" : "ArrowDown";
@@ -2267,13 +2945,14 @@
     const steps = Math.abs(currentIdx - targetPos);
 
     for (let s = 0; s < steps; s++) {
-      key(stepKey, stepKey, stepCode, (doc && doc.activeElement) || handleEl);
-      await sleepMs(35);
+      dispatchKeyPair(stepKey, stepKey, stepCode, (doc && doc.activeElement) || handleEl);
+      await sleepMs(55);
     }
 
-    // Space keydown to drop item
-    key(" ", "Space", 32, (doc && doc.activeElement) || handleEl);
-    await sleepMs(50);
+    await sleepMs(70);
+    // Space keydown/keyup to drop item, wait 200ms for drop animation to settle
+    dispatchKeyPair(" ", "Space", 32, (doc && doc.activeElement) || handleEl);
+    await sleepMs(200);
     return true;
   }
 
@@ -2318,12 +2997,35 @@
   }
 
   /**
+   * Normalizes order card text by stripping leading step badges (`1.`, `Step 2:`, etc.),
+   * drag handle glyphs (`⋮⋮`, `⠿`, `∷`, `::`), and collapsing whitespace.
+   */
+  function normalizeOrderCardText(str) {
+    if (!str) return "";
+    let s = String(str)
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19]+/g, " ")
+      .replace(/::+/g, " ")
+      .trim();
+    for (let i = 0; i < 3; i++) {
+      const next = s
+        .replace(/^(\d+[\.\)\:]\s*|step\s+\d+(?:[\:\-\.]\s*|\s+))(?=\S)/i, "")
+        .replace(/^[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19:\s]+/, "")
+        .trim();
+      if (!next || next === s) break;
+      s = next;
+    }
+    s = stripDecorativePrefix(s);
+    return s.replace(/\s+/g, " ").trim();
+  }
+
+  /**
    * Cleans text from a sortable element by stripping decorative symbols, drag handles (☰, ::, ⋮⋮), and numbers.
    */
   function cleanItemText(el) {
     if (!el) return "";
     let raw = getCleanVisibleText(el, false) || (el.innerText || el.textContent || "");
-    return cleanText(stripDecorativePrefix(raw));
+    return normalizeOrderCardText(raw);
   }
 
   /**
@@ -2447,8 +3149,8 @@
         const id = getItemId(row);
         if (id !== target) return false;
       } else {
-        const rowText = cleanItemText(row);
-        const targetClean = cleanText(stripDecorativePrefix(target));
+        const rowText = normalizeOrderCardText(cleanItemText(row));
+        const targetClean = normalizeOrderCardText(target);
 
         if (rowText.toLowerCase() === targetClean.toLowerCase()) continue;
 
@@ -2479,18 +3181,49 @@
 
     function cleanStr(s) {
       if (!s) return "";
-      return String(s)
-        .replace(/^[\u2800-\u28FF\u22EE\u22EF\u22F0\u22F1\u2630\uFE19::⋮⠿]+\s*/, "")
-        .replace(/^[1-8](?:[\.\)\:\-\s]+|\s+)(?=[A-Za-z`"'\<\(])/, "")
-        .replace(/^[1-8]$/, "")
-        .replace(/^\(\s*([A-Fa-f0-9]{1,2})\s*\)\s+/, "")
-        .replace(/^\[\s*([A-Fa-f0-9]{1,2})\s*\]\s+/, "")
-        .replace(/^[A-Fa-f][\.\)\:]\s+/, "")
-        .replace(/^[0-9]{1,2}[\.\)]\s+/, "")
+      let out = String(s)
         .replace(/[\u200B-\u200D\uFEFF]/g, "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
+        .replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\1\b/g, "$1")
+        .replace(/[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19]+/g, " ")
+        .replace(/::+/g, " ")
+        .trim();
+      for (let i = 0; i < 3; i++) {
+        const next = out
+          .replace(/^(\d+[\.\)\:]\s*|step\s+\d+(?:[\:\-\.]\s*|\s+))(?=\S)/i, "")
+          .replace(/^[1-8](?:[\.\)\:\-\s]+|\s+)(?=[A-Za-z`"'\<\(\$])/, "")
+          .replace(/^\(\s*([A-Fa-f0-9]{1,2})\s*\)\s+/, "")
+          .replace(/^\[\s*([A-Fa-f0-9]{1,2})\s*\]\s+/, "")
+          .replace(/^[A-Fa-f][\.\)\:]\s+/, "")
+          .replace(/^[0-9]{1,2}[\.\)]\s+/, "")
+          .replace(/^[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19:\s]+/, "")
+          .trim();
+        if (!next || next === out) break;
+        out = next;
+      }
+      return out.replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    function extractRowText(el) {
+      if (!el) return "";
+      try {
+        if (typeof getCleanVisibleText === "function") {
+          const v = getCleanVisibleText(el, false);
+          if (v) return cleanStr(v);
+        }
+      } catch (_) {}
+      try {
+        if (typeof el.cloneNode === "function") {
+          const clone = el.cloneNode(true);
+          if (clone && typeof clone.querySelectorAll === "function") {
+            const hiddenMath = clone.querySelectorAll(".katex-mathml, .MJX_Assistive_MathML, math, annotation, script, style, svg");
+            for (const hm of hiddenMath) {
+              try { hm.remove(); } catch (_) {}
+            }
+            return cleanStr(clone.textContent || clone.innerText || "");
+          }
+        }
+      } catch (_) {}
+      return cleanStr(el.innerText || el.textContent || "");
     }
 
     const doc = (typeof document !== "undefined") ? document : null;
@@ -2530,13 +3263,13 @@
     if (rows.length === 0) {
       const allDivs = Array.from(doc.querySelectorAll("div, li, tr"));
       const matchingDivs = allDivs.filter((el) => {
-        const t = cleanStr(el.innerText || el.textContent || "");
+        const t = extractRowText(el);
         return targetTexts.some((tgt) => cleanStr(tgt) === t);
       });
       const uniqueMatches = [];
       for (const el of matchingDivs) {
-        const t = cleanStr(el.innerText || el.textContent || "");
-        if (!uniqueMatches.some((u) => cleanStr(u.innerText || u.textContent || "") === t)) {
+        const t = extractRowText(el);
+        if (!uniqueMatches.some((u) => extractRowText(u) === t)) {
           uniqueMatches.push(el);
         }
       }
@@ -2555,21 +3288,53 @@
       return key ? el[key] : null;
     }
 
-    const currentTexts = rows.map(r => cleanStr(r.innerText || r.textContent || ""));
+    const currentTexts = rows.map(r => extractRowText(r));
     const targetClean = targetTexts.map(cleanStr);
-    const isAlreadyMatch = currentTexts.length === N && currentTexts.every((t, i) => t === targetClean[i] || t.includes(targetClean[i]) || targetClean[i].includes(t));
+    const isAlreadyMatch = currentTexts.length === N && currentTexts.every((t, i) => {
+      if (!t || !targetClean[i]) return false;
+      if (t === targetClean[i]) return true;
+      const tNorm = t.replace(/[^a-z0-9]/g, "");
+      const tgtNorm = targetClean[i].replace(/[^a-z0-9]/g, "");
+      if (tNorm && tgtNorm && tNorm === tgtNorm) return true;
+      if (tNorm.length >= 8 && tgtNorm.length >= 8 && (tNorm.includes(tgtNorm) || tgtNorm.includes(tNorm))) return true;
+      return false;
+    });
     if (isAlreadyMatch) {
       return { success: true, already_matched: true, method: "already_correct" };
     }
 
     const targetOrderIndices = [];
+    const usedRowIndices = new Set();
     for (let j = 0; j < N; j++) {
       const tgt = targetClean[j];
-      let foundIdx = rows.findIndex(r => {
-        const ct = cleanStr(r.innerText || r.textContent || "");
-        return ct === tgt || ct.includes(tgt) || tgt.includes(ct);
+      const tgtAlnum = tgt.replace(/[^a-z0-9]/g, "");
+      let foundIdx = rows.findIndex((r, idx) => {
+        if (usedRowIndices.has(idx)) return false;
+        const ct = currentTexts[idx];
+        return ct === tgt;
       });
-      if (foundIdx === -1) foundIdx = j;
+      if (foundIdx === -1) {
+        foundIdx = rows.findIndex((r, idx) => {
+          if (usedRowIndices.has(idx)) return false;
+          const ct = currentTexts[idx];
+          const ctAlnum = ct.replace(/[^a-z0-9]/g, "");
+          return (ct && tgt && (ct.includes(tgt) || tgt.includes(ct))) ||
+                 (ctAlnum && tgtAlnum && (ctAlnum === tgtAlnum || ctAlnum.includes(tgtAlnum) || tgtAlnum.includes(ctAlnum)));
+        });
+      }
+      if (foundIdx === -1 && Array.isArray(payload.options) && payload.options.length === N) {
+        const optIdx = payload.options.findIndex((opt, idx) => !usedRowIndices.has(idx) && cleanStr(opt) === tgt);
+        if (optIdx !== -1) foundIdx = optIdx;
+      }
+      if (foundIdx === -1) {
+        for (let k = 0; k < N; k++) {
+          if (!usedRowIndices.has(k)) {
+            foundIdx = k;
+            break;
+          }
+        }
+      }
+      usedRowIndices.add(foundIdx);
       targetOrderIndices.push(foundIdx);
     }
 
@@ -2591,9 +3356,10 @@
 
     let curr = fiberCandidate;
     let depth = 0;
+    let invokedMethod = null;
     while (curr && depth < 35) {
       const props = curr.memoizedProps;
-      if (props) {
+      if (props && !invokedMethod) {
         // PATH 1A.1 react-sortable-hoc onSortEnd
         if (typeof props.onSortEnd === "function") {
           try {
@@ -2612,14 +3378,14 @@
                 simulatedList.splice(targetPos, 0, moved);
               }
             }
-            return { success: true, method: "react_sortable_hoc_onSortEnd" };
+            invokedMethod = "react_sortable_hoc_onSortEnd";
           } catch (err) {
             console.warn("[QuizZy] onSortEnd error:", err);
           }
         }
 
         // PATH 1A.2 react-beautiful-dnd / @hello-pangea/dnd / @dnd-kit onDragEnd
-        if (typeof props.onDragEnd === "function") {
+        if (!invokedMethod && typeof props.onDragEnd === "function") {
           try {
             let droppableId = "droppable";
             const dropEl = doc.querySelector("[data-rbd-droppable-id], [data-rfd-droppable-id]");
@@ -2628,7 +3394,13 @@
             }
 
             const draggableIds = rows.map((r, idx) => {
-              return (r.getAttribute && (r.getAttribute("data-rbd-draggable-id") || r.getAttribute("data-rfd-draggable-id") || r.getAttribute("data-id") || r.getAttribute("id"))) || `item-${idx}`;
+              const directId = r.getAttribute && (r.getAttribute("data-rbd-draggable-id") || r.getAttribute("data-rfd-draggable-id") || r.getAttribute("data-rbd-drag-handle-draggable-id") || r.getAttribute("data-rfd-drag-handle-draggable-id") || r.getAttribute("data-id") || r.getAttribute("id"));
+              if (directId) return directId;
+              const childDrag = r.querySelector && r.querySelector("[data-rbd-draggable-id], [data-rfd-draggable-id], [data-rbd-drag-handle-draggable-id], [data-rfd-drag-handle-draggable-id], [data-id]");
+              if (childDrag && childDrag.getAttribute) {
+                return childDrag.getAttribute("data-rbd-draggable-id") || childDrag.getAttribute("data-rfd-draggable-id") || childDrag.getAttribute("data-rbd-drag-handle-draggable-id") || childDrag.getAttribute("data-rfd-drag-handle-draggable-id") || childDrag.getAttribute("data-id") || `item-${idx}`;
+              }
+              return `item-${idx}`;
             });
 
             let simulatedList = rows.map((_, idx) => idx);
@@ -2656,7 +3428,7 @@
                 simulatedList.splice(targetPos, 0, moved);
               }
             }
-            return { success: true, method: "react_rbd_onDragEnd" };
+            invokedMethod = "react_rbd_onDragEnd";
           } catch (err) {
             console.warn("[QuizZy] onDragEnd error:", err);
           }
@@ -2682,7 +3454,7 @@
             if (matchedAll) {
               try {
                 curr.stateNode.setState({ [k]: reordered });
-                return { success: true, method: "react_class_setState", stateKey: k };
+                return { success: true, method: invokedMethod || "react_class_setState", stateKey: k };
               } catch (err) {
                 console.warn("[QuizZy] setState error:", err);
               }
@@ -2712,7 +3484,7 @@
               if (matchedAll) {
                 try {
                   hook.queue.dispatch(reordered);
-                  return { success: true, method: "react_hook_dispatch" };
+                  return { success: true, method: invokedMethod || "react_hook_dispatch" };
                 } catch (err) {
                   console.warn("[QuizZy] hook dispatch error:", err);
                 }
@@ -2726,6 +3498,10 @@
 
       curr = curr.return;
       depth++;
+    }
+
+    if (invokedMethod) {
+      return { success: true, method: invokedMethod };
     }
 
     return { success: false, error: "React Fiber tree walked but no suitable dnd handlers or state arrays found" };
@@ -2888,12 +3664,20 @@
 
       // Check if already in correct order
       if (isOrderMatching(liveRows, desiredTargets, isIdMode)) {
+        if (doc.activeElement && typeof doc.activeElement.blur === "function") {
+          try { doc.activeElement.blur(); } catch (_) {}
+        }
+        if (win) {
+          win.__QUIZZY_ORDER_VERIFIED__ = true;
+          win.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = liveRows[0] || null;
+        }
         return {
           ok: true,
           success: true,
           selected: true,
           verified: true,
           verified_order: true,
+          q_type: "order",
           already_correct: true,
           moves: 0,
           action: "order_reordered",
@@ -2929,12 +3713,20 @@
             await sleepMs(60);
             liveRows = getLiveOrderRows(doc, payload);
             if (isOrderMatching(liveRows, desiredTargets, isIdMode)) {
+              if (doc.activeElement && typeof doc.activeElement.blur === "function") {
+                try { doc.activeElement.blur(); } catch (_) {}
+              }
+              if (win) {
+                win.__QUIZZY_ORDER_VERIFIED__ = true;
+                win.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = liveRows[0] || null;
+              }
               return {
                 ok: true,
                 success: true,
                 selected: true,
                 verified: true,
                 verified_order: true,
+                q_type: "order",
                 method: "react_main_world",
                 action: "order_reordered",
                 final_order: liveRows.map(cleanItemText)
@@ -2956,12 +3748,20 @@
           await sleepMs(60);
           liveRows = getLiveOrderRows(doc, payload);
           if (isOrderMatching(liveRows, desiredTargets, isIdMode)) {
+            if (doc.activeElement && typeof doc.activeElement.blur === "function") {
+              try { doc.activeElement.blur(); } catch (_) {}
+            }
+            if (win) {
+              win.__QUIZZY_ORDER_VERIFIED__ = true;
+              win.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = liveRows[0] || null;
+            }
             return {
               ok: true,
               success: true,
               selected: true,
               verified: true,
               verified_order: true,
+              q_type: "order",
               method: "react_main_world_direct",
               action: "order_reordered",
               final_order: liveRows.map(cleanItemText)
@@ -2970,32 +3770,55 @@
         }
       } catch (_) {}
 
-      // LAYER 2, 3, 4: Live DOM Drag-Handle Iterative Move Loop
+      // SMOOTH MULTI-FRAME DRAG EXECUTION ENGINE (Strategies 1 -> 2 -> 3)
       let totalMoves = 0;
 
       for (let targetPos = 0; targetPos < desiredTargets.length; targetPos++) {
-        // Re-fetch live rows on EVERY iteration!
+        // Re-query the live DOM container before EVERY single swap to eliminate stale indices
         liveRows = getLiveOrderRows(doc, payload);
+        const usedIndices = new Set();
+        for (let k = 0; k < targetPos; k++) {
+          usedIndices.add(k);
+        }
 
-        // Find current position of the item that belongs at targetPos
+        // Find which currentIdx (where currentIdx >= targetPos) matches desiredTargets[targetPos]
         let currentIdx = -1;
         const targetVal = desiredTargets[targetPos];
 
         if (isIdMode) {
-          currentIdx = liveRows.findIndex(r => getItemId(r) === targetVal);
+          for (let j = targetPos; j < liveRows.length; j++) {
+            if (!usedIndices.has(j) && getItemId(liveRows[j]) === targetVal) {
+              currentIdx = j;
+              break;
+            }
+          }
+          if (currentIdx === -1) {
+            currentIdx = liveRows.findIndex(r => getItemId(r) === targetVal);
+          }
         } else {
-          const targetClean = cleanText(stripDecorativePrefix(targetVal)).toLowerCase();
-          for (let j = 0; j < liveRows.length; j++) {
-            const rowText = cleanItemText(liveRows[j]).toLowerCase();
+          const targetClean = normalizeOrderCardText(targetVal).toLowerCase();
+          const normTarget = targetClean.replace(/[^a-z0-9]/g, "");
+          for (let j = targetPos; j < liveRows.length; j++) {
+            if (usedIndices.has(j)) continue;
+            const rowText = normalizeOrderCardText(cleanItemText(liveRows[j])).toLowerCase();
             if (rowText === targetClean) {
               currentIdx = j;
               break;
             }
             const normRow = rowText.replace(/[^a-z0-9]/g, "");
-            const normTarget = targetClean.replace(/[^a-z0-9]/g, "");
             if (normRow && normTarget && (normRow === normTarget || normRow.includes(normTarget) || normTarget.includes(normRow))) {
               currentIdx = j;
               break;
+            }
+          }
+          if (currentIdx === -1) {
+            for (let j = 0; j < liveRows.length; j++) {
+              const rowText = normalizeOrderCardText(cleanItemText(liveRows[j])).toLowerCase();
+              const normRow = rowText.replace(/[^a-z0-9]/g, "");
+              if (rowText === targetClean || (normRow && normTarget && (normRow === normTarget || normRow.includes(normTarget) || normTarget.includes(normRow)))) {
+                currentIdx = j;
+                break;
+              }
             }
           }
         }
@@ -3013,14 +3836,34 @@
           if (isIdMode) {
             return getItemId(rows[targetPos]) === targetVal;
           }
-          const rowText = cleanItemText(rows[targetPos]).toLowerCase();
-          const targetClean = cleanText(stripDecorativePrefix(targetVal)).toLowerCase();
+          const rowText = normalizeOrderCardText(cleanItemText(rows[targetPos])).toLowerCase();
+          const targetClean = normalizeOrderCardText(targetVal).toLowerCase();
           return rowText === targetClean || rowText.replace(/[^a-z0-9]/g, "").includes(targetClean.replace(/[^a-z0-9]/g, ""));
         }
 
-        // LAYER 2: Frame-Paced Pointer + Mouse Drag on drag handle
-        await simulateHandleMouseDrag(handleEl, sourceRow, targetRow, currentIdx, targetPos);
-        await sleepMs(60);
+        const hasKeyboardSensorAttrs = Boolean(
+          (handleEl && handleEl.hasAttribute && (handleEl.hasAttribute("data-rbd-drag-handle-draggable-id") || handleEl.hasAttribute("data-rbd-draggable-id") || handleEl.hasAttribute("data-rfd-drag-handle-draggable-id") || handleEl.hasAttribute("data-rfd-draggable-id"))) ||
+          (sourceRow && sourceRow.hasAttribute && (sourceRow.hasAttribute("data-rbd-drag-handle-draggable-id") || sourceRow.hasAttribute("data-rbd-draggable-id") || sourceRow.hasAttribute("data-rfd-drag-handle-draggable-id") || sourceRow.hasAttribute("data-rfd-draggable-id"))) ||
+          (handleEl && typeof handleEl.tabIndex === "number" && handleEl.tabIndex >= 0) ||
+          (sourceRow && typeof sourceRow.tabIndex === "number" && sourceRow.tabIndex >= 0)
+        );
+
+        // STRATEGY 1: React-Beautiful-DnD / Keyboard Sensor
+        if (hasKeyboardSensorAttrs) {
+          await simulateHandleKeyboardDrag(handleEl, currentIdx, targetPos);
+          liveRows = getLiveOrderRows(doc, payload);
+          if (checkSlotMatches(liveRows)) {
+            totalMoves++;
+            continue;
+          }
+        }
+
+        // STRATEGY 2: Smooth Interpolated Pointer & Mouse Drag (10 steps, 18ms spacing, 8px initial slop, 60ms target pause, 200ms settle)
+        liveRows = getLiveOrderRows(doc, payload);
+        const curSourceRow = liveRows[currentIdx] || sourceRow;
+        const curTargetRow = liveRows[targetPos] || targetRow;
+        const curHandleEl = findDragHandleInRow(curSourceRow) || curSourceRow;
+        await simulateHandleMouseDrag(curHandleEl, curSourceRow, curTargetRow, currentIdx, targetPos);
 
         liveRows = getLiveOrderRows(doc, payload);
         if (checkSlotMatches(liveRows)) {
@@ -3028,22 +3871,30 @@
           continue;
         }
 
-        // LAYER 3: Keyboard Sensor Reordering (Space -> ArrowUp/ArrowDown -> Space on handleEl)
-        await simulateHandleKeyboardDrag(handleEl, currentIdx, targetPos);
-        await sleepMs(60);
-
-        liveRows = getLiveOrderRows(doc, payload);
-        if (checkSlotMatches(liveRows)) {
-          totalMoves++;
-          continue;
+        // Fallback to keyboard sensor if not yet tried in Strategy 1
+        if (!hasKeyboardSensorAttrs) {
+          await simulateHandleKeyboardDrag(curHandleEl, currentIdx, targetPos);
+          liveRows = getLiveOrderRows(doc, payload);
+          if (checkSlotMatches(liveRows)) {
+            totalMoves++;
+            continue;
+          }
         }
 
-        // LAYER 4: HTML5 DragEvent cascade
-        await simulateHandleHtml5Drag(handleEl, sourceRow, targetRow);
+        // STRATEGY 3: HTML5 DragEvent with DataTransfer
+        await simulateHandleHtml5Drag(curHandleEl, curSourceRow, curTargetRow);
         await sleepMs(60);
 
         liveRows = getLiveOrderRows(doc, payload);
         totalMoves++;
+      }
+
+      // Wait 220ms after final swap completes so React portals and CSS transitions finish updating the DOM
+      await sleepMs(220);
+
+      // Release Drag Handle Focus Trap before pre-submit verification and Submit click
+      if (doc.activeElement && typeof doc.activeElement.blur === "function") {
+        try { doc.activeElement.blur(); } catch (_) {}
       }
 
       // PRE-SUBMIT VERIFICATION GATE
@@ -3051,12 +3902,17 @@
       const isFinalVerified = isOrderMatching(liveRows, desiredTargets, isIdMode);
 
       if (isFinalVerified) {
+        if (win) {
+          win.__QUIZZY_ORDER_VERIFIED__ = true;
+          win.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = liveRows[0] || null;
+        }
         return {
           ok: true,
           success: true,
           selected: true,
           verified: true,
           verified_order: true,
+          q_type: "order",
           action: "order_reordered",
           moves: totalMoves,
           final_order: liveRows.map(cleanItemText)
@@ -3132,9 +3988,9 @@
 
       const allButtons = Array.from(doc.querySelectorAll(
         "button, a.btn, [role='button'], input[type='button'], input[type='submit']"
-      )).filter(isVisible);
+      ));
 
-      const candidate = allButtons.find(isNextCandidate);
+      const candidate = allButtons.find(b => isNextCandidate(b) && isVisible(b));
       if (candidate) return candidate;
 
       const nextHeuristics = [
@@ -3148,7 +4004,7 @@
       for (const sel of nextHeuristics) {
         try {
           const el = doc.querySelector(sel);
-          if (el && isVisible(el) && !el.disabled && !isIgnoredButton(el)) {
+          if (el && !el.disabled && !isIgnoredButton(el) && isVisible(el)) {
             return el;
           }
         } catch (e) {}
@@ -3160,7 +4016,7 @@
     const directNext = findReadyNext(customNextSelector);
     if (directNext) {
       const clicked = dispatchClick(directNext);
-      const btnText = cleanText(directNext.innerText || directNext.textContent || directNext.value || "Next");
+      const btnText = cleanText(directNext.textContent || directNext.innerText || directNext.value || "Next");
       return {
         ok: clicked,
         success: clicked,
@@ -3173,7 +4029,7 @@
     function isQuizCompleted(d) {
       if (!d) return false;
       const root = d.body || d;
-      const bodyText = (root.innerText || root.textContent || "").toLowerCase();
+      const bodyText = (root.textContent || root.innerText || "").toLowerCase();
 
       // NEVER treat "END PRACTICE" as completion
       // 1. Dedicated completion summary view or congratulatory screens
@@ -3184,13 +4040,13 @@
       }
 
       // 2. Check for explicit finish / view report buttons (EXCLUDING "End Practice", "Skip", "Show Answer")
-      const btns = Array.from(d.querySelectorAll("button, a.btn, [role='button'], input[type='button']")).filter(isVisible);
+      const btns = Array.from(d.querySelectorAll("button, a.btn, [role='button'], input[type='button']"));
       for (const b of btns) {
-        const bText = cleanText(b.innerText || b.textContent || b.value || "").toLowerCase();
+        const bText = cleanText(b.textContent || b.innerText || b.value || "").toLowerCase();
         if (bText.includes("end practice") || bText === "skip" || bText === "show answer") {
           continue; // EXPLICITLY IGNORE
         }
-        if (/^(?:finish|view\s*report|view\s*results|review\s*test)\b/i.test(bText)) {
+        if (/^(?:finish|view\s*report|view\s*results|review\s*test)\b/i.test(bText) && isVisible(b)) {
           return true;
         }
       }
@@ -3211,20 +4067,21 @@
     // (B) If not, check if a SUBMIT button is present (two-step submit -> next)
     const allButtons = Array.from(doc.querySelectorAll(
       "button, a.btn, [role='button'], input[type='button'], input[type='submit']"
-    )).filter(isVisible);
+    ));
 
-    const submitBtn = allButtons.find(isSubmitCandidate);
+    const submitBtn = allButtons.find(b => isSubmitCandidate(b) && isVisible(b));
     if (submitBtn) {
       // MANDATORY PRE-SUBMIT SELECTION VERIFICATION GATE:
       // The verified pipeline is: View question -> Solve it -> Select option -> Submit.
       // If the question contains options, ensure at least one option is selected.
       // Never click Submit if no option is selected!
-      const optionsOnPage = findOptionElements(null, null, doc);
+      const optionsOnPage = findOptionElements(null, null, false);
       if (optionsOnPage && optionsOnPage.length >= 2) {
-        const anyChecked = optionsOnPage.some(isOptionChecked);
+        const anyChecked = optionsOnPage.some(el => isOptionChecked(el, null));
         const checkedInputs = doc.querySelectorAll("input[type='radio']:checked, input[type='checkbox']:checked");
         const hasCheckedInput = checkedInputs && checkedInputs.length > 0;
-        const hasTrackedSelection = (typeof window !== "undefined" && window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ && doc.contains(window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__));
+        const hasQuizzySelectedAttr = Boolean(doc.querySelector("[data-quizzy-selected='true']"));
+        const hasTrackedSelection = Boolean(typeof window !== "undefined" && (window.__QUIZZY_ORDER_VERIFIED__ || hasQuizzySelectedAttr || (window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ && (!doc.contains || doc.contains(window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__)))));
 
         if (!anyChecked && !hasCheckedInput && !hasTrackedSelection) {
           console.warn("[QuizZy Executor] Blocked SUBMIT: No option is currently selected on this question. Process is: View -> Solve -> Select -> Submit.");
@@ -3237,24 +4094,32 @@
         }
       }
 
+      // Release drag handle or option focus trap before clicking Submit
+      if (doc.activeElement && typeof doc.activeElement.blur === "function") {
+        try { doc.activeElement.blur(); } catch (_) {}
+      }
+
       const initialStem = (function() {
         try {
           const stemEl = doc.querySelector(".sc-question-stem, .question-stem, [class*='question-text'], p, h1, h2");
-          return stemEl ? cleanText(stemEl.innerText || stemEl.textContent || "") : "";
+          return stemEl ? cleanText(stemEl.textContent || stemEl.innerText || "") : "";
         } catch (_) { return ""; }
       })();
 
-      const submitText = cleanText(submitBtn.innerText || submitBtn.textContent || submitBtn.value || "Submit");
+      const submitText = cleanText(submitBtn.textContent || submitBtn.innerText || submitBtn.value || "Submit");
       dispatchClick(submitBtn);
 
-      // Deterministic polling: check every 60ms up to 4500ms for NEXT button to appear/enable
-      const pollIntervalMs = 60;
+      // Deterministic non-thrashing polling: check every 150ms up to 4500ms for NEXT button to appear/enable
+      const pollIntervalMs = 150;
       const maxWaitMs = 4500;
       let waitedMs = 0;
       let postNext = null;
       let retriedOptionSelect = false;
 
       while (waitedMs < maxWaitMs) {
+        if (activeExecutionAbortController && activeExecutionAbortController.signal && activeExecutionAbortController.signal.aborted) {
+          return { ok: false, success: false, aborted: true, reason: "Execution aborted by navigation or kill-switch." };
+        }
         await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
         waitedMs += pollIntervalMs;
 
@@ -3267,7 +4132,7 @@
         if (initialStem) {
           try {
             const currentStemEl = doc.querySelector(".sc-question-stem, .question-stem, [class*='question-text'], p, h1, h2");
-            const currentStem = currentStemEl ? cleanText(currentStemEl.innerText || currentStemEl.textContent || "") : "";
+            const currentStem = currentStemEl ? cleanText(currentStemEl.textContent || currentStemEl.innerText || "") : "";
             if (currentStem && currentStem !== initialStem) {
               if (typeof window !== "undefined") {
                 window.__QUIZZY_LAST_SELECTED_OPTION__ = null;
@@ -3285,9 +4150,23 @@
           } catch (_) {}
         }
 
-        // Check if "Please select an option" validation error appeared
-        const pageText = (doc.body ? doc.body.innerText || doc.body.textContent : doc.documentElement.textContent || "").toLowerCase();
-        const hasSelectOptionError = /please\s*select\s*an?\s*(?:option|answer)|select\s*an?\s*option/i.test(pageText);
+        // Check if "Please select an option" validation error appeared (using targeted containers to prevent megabyte serialization and layout reflows)
+        let hasSelectOptionError = false;
+        const errEls = doc.querySelectorAll ? Array.from(doc.querySelectorAll("[class*='error' i], [class*='alert' i], [role='alert' i], .toast, [class*='warning' i]")) : [];
+        for (const el of errEls) {
+          const txt = getCleanVisibleText ? getCleanVisibleText(el) : ((el.textContent || "").trim());
+          if (/please\s*select\s*an?\s*(?:option|answer)|select\s*an?\s*option/i.test(txt)) {
+            hasSelectOptionError = true;
+            break;
+          }
+        }
+        if (!hasSelectOptionError && doc.querySelector) {
+          const quizCard = doc.querySelector(".sc-card, [class*='card' i], [class*='quiz' i], [class*='question' i]");
+          if (quizCard) {
+            const cardTxt = getCleanVisibleText ? getCleanVisibleText(quizCard) : ((quizCard.textContent || "").trim());
+            hasSelectOptionError = /please\s*select\s*an?\s*(?:option|answer)|select\s*an?\s*option/i.test(cardTxt);
+          }
+        }
 
         if (!retriedOptionSelect && hasSelectOptionError) {
           const lastOpt = (typeof window !== "undefined") ? window.__QUIZZY_LAST_SELECTED_OPTION__ : null;
@@ -3921,7 +4800,7 @@
               const fullRange = typeof activeModel.getFullModelRange === "function"
                 ? activeModel.getFullModelRange()
                 : { startLineNumber: 1, startColumn: 1, endLineNumber: (activeModel.getLineCount ? activeModel.getLineCount() : 9999), endColumn: 9999 };
-              monacoInstance.executeEdits("reconcile", [{ range: fullRange, text: val }]);
+              monacoInstance.executeEdits(null, [{ range: fullRange, text: val }]);
             }
           },
           language: lang
@@ -4249,11 +5128,14 @@
           const fullRange = typeof monacoModel.getFullModelRange === "function"
             ? monacoModel.getFullModelRange()
             : { startLineNumber: 1, startColumn: 1, endLineNumber: (monacoModel.getLineCount ? monacoModel.getLineCount() : 9999), endColumn: 9999 };
-          monacoEditorInstance.executeEdits("keyboard", [{
+          monacoEditorInstance.executeEdits(null, [{
             range: fullRange,
             text: finalCode,
             forceMoveMarkers: true
           }]);
+          if (typeof monacoEditorInstance.trigger === "function") {
+            try { monacoEditorInstance.trigger("keyboard", "type", { text: "" }); } catch (_) {}
+          }
           if (monacoModel.getValue && monacoModel.getValue() === finalCode) {
             monacoSuccess = true;
           }
@@ -5066,7 +5948,7 @@
     }
 
     if (res && typeof res.then === "function") {
-      return res.then((asyncRes) => {
+      return res.then(async (asyncRes) => {
         if (asyncRes && (asyncRes.selected === false || asyncRes.ok === false || asyncRes.success === false)) {
           return Object.assign({}, asyncRes, {
             ok: false,
@@ -5075,10 +5957,17 @@
             error: asyncRes.error || "OPTION_SELECTION_FAILED"
           });
         }
-        return Object.assign({}, asyncRes, {
+        const finalRes = Object.assign({}, asyncRes, {
+          q_type: asyncRes && asyncRes.q_type ? asyncRes.q_type : qType,
           ok: asyncRes && asyncRes.ok !== undefined ? asyncRes.ok : (asyncRes && asyncRes.success),
           selected: asyncRes && asyncRes.selected !== undefined ? asyncRes.selected : (asyncRes && asyncRes.success)
         });
+        if (payload && payload.action === "submit_then_next" && finalRes.ok && finalRes.selected) {
+          const nextRes = await clickNextButton(payload.customNextSelector);
+          finalRes.nextResult = nextRes;
+          finalRes.submitted = Boolean(nextRes && (nextRes.ok || nextRes.success));
+        }
+        return finalRes;
       });
     }
 
@@ -5091,10 +5980,19 @@
       });
     }
 
-    return Object.assign({}, res, {
+    const syncRes = Object.assign({}, res, {
+      q_type: res && res.q_type ? res.q_type : qType,
       ok: res.ok !== undefined ? res.ok : res.success,
       selected: res.selected !== undefined ? res.selected : res.success
     });
+    if (payload && payload.action === "submit_then_next" && syncRes.ok && syncRes.selected) {
+      return clickNextButton(payload.customNextSelector).then((nextRes) => {
+        syncRes.nextResult = nextRes;
+        syncRes.submitted = Boolean(nextRes && (nextRes.ok || nextRes.success));
+        return syncRes;
+      });
+    }
+    return syncRes;
   }
 
   // Idempotent Escape key listener for host page emergency kill switch
@@ -5163,6 +6061,7 @@
     simulateHandleMouseDrag,
     simulateHandleKeyboardDrag,
     simulateHandleHtml5Drag,
+    normalizeOrderCardText,
     cleanItemText,
     executeOrderAction,
     reorderSortableOptions: executeOrderAction,
@@ -5184,10 +6083,81 @@
     clickNextButton,
     clickSkipButton,
     swipeOrAdvanceQuestion,
+    abortPendingExecution,
+    getActiveAbortController: () => activeExecutionAbortController,
+    unwrapOptionElements,
     executeAction,
     executeQuizAction: executeAction,
-    isQuizZyInternalElement
+    isQuizZyInternalElement,
+    recycleMemory: recycleExecutorMemory,
+    resetQuestionLifecycleState: recycleExecutorMemory,
+    runPortalCompletionLoop: (options) => {
+      if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.runPortalCompletionLoop === "function") {
+        return window.QuizZyPortalCompletion.runPortalCompletionLoop(options);
+      }
+      return Promise.resolve({ success: false, reason: "QuizZyPortalCompletion not loaded" });
+    }
   };
+
+  function recycleExecutorMemory() {
+    abortPendingExecution("PerQuestionAtomicReset");
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_PRE_CLICK_SNAPSHOTS__ = [];
+      window.__QUIZZY_LAST_SELECTED_OPTION__ = null;
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = null;
+      window.__QUIZZY_ORDER_VERIFIED__ = false;
+      window.__QUIZZY_ORDER_LOCK__ = false;
+    }
+    if (typeof document !== "undefined") {
+      try {
+        const styleEl = document.getElementById("quizzy-optin-highlight-styles");
+        if (styleEl && typeof styleEl.remove === "function") styleEl.remove();
+        const winners = document.querySelectorAll(".quizzy-optin-winner");
+        winners.forEach((el) => {
+          if (el && el.classList) el.classList.remove("quizzy-optin-winner");
+        });
+        const badges = document.querySelectorAll(".quizzy-order-target-badge");
+        badges.forEach((b) => {
+          if (b && typeof b.remove === "function") b.remove();
+        });
+        const highlighted = document.querySelectorAll("[data-quizzy-highlight]");
+        highlighted.forEach((el) => {
+          if (el && typeof el.removeAttribute === "function") {
+            el.removeAttribute("data-quizzy-highlight");
+          }
+          if (el && el.style) {
+            el.style.outline = "";
+            el.style.outlineOffset = "";
+          }
+        });
+      } catch (_) {}
+    }
+  }
+
+  function registerRecycleHandler(handler) {
+    if (typeof window === "undefined") return;
+    if (!Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__ = [];
+    }
+    if (typeof handler === "function" && !window.__QUIZZY_RECYCLE_HANDLERS__.includes(handler)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__.push(handler);
+    }
+    if (typeof window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ !== "function") {
+      window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ = function () {
+        if (Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+          for (const fn of window.__QUIZZY_RECYCLE_HANDLERS__) {
+            try {
+              if (typeof fn === "function") fn();
+            } catch (err) {
+              console.warn("[QuizZy Recycle] Handler failed:", err);
+            }
+          }
+        }
+      };
+    }
+  }
+
+  registerRecycleHandler(recycleExecutorMemory);
 
   if (typeof window !== "undefined") {
     window.QuizZyExecutor = QuizZyExecutor;

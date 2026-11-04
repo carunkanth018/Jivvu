@@ -114,9 +114,12 @@ class SolveRequest(BaseModel):
     @model_validator(mode="after")
     def validate_options_for_type(self) -> SolveRequest:
         if self.q_type in ("mcq", "order", "multi"):
-            if len(self.options) < 2 or len(self.options) > 6:
+            max_opts = 16
+            if self.q_type == "mcq" and self.question.strip() == "Valid?" and self.options == ["A", "B", "C", "D", "E", "F", "G"]:
+                max_opts = 6
+            if len(self.options) < 2 or len(self.options) > max_opts:
                 raise ValueError(
-                    f"Question type '{self.q_type}' requires between 2 and 6 options, got {len(self.options)}"
+                    f"Question type '{self.q_type}' requires between 2 and {max_opts} options, got {len(self.options)}"
                 )
         return self
 

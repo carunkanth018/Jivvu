@@ -24,6 +24,7 @@ import csv
 import hashlib
 import json
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -75,6 +76,9 @@ from backend.schemas import (
     SolveResponse,
     StatsResponse,
 )
+
+
+_csv_write_lock = threading.Lock()
 
 
 def save_or_update_question_csv(
@@ -139,47 +143,48 @@ def save_or_update_question_csv(
     existing_rows: List[Dict[str, str]] = []
     matched_id: Optional[str] = None
 
-    if path.is_file():
-        with open(path, mode="r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                r_q = normalize_text_answer(row.get("question", ""))
-                try:
-                    r_opts = json.loads(row.get("options_json", "[]"))
-                except Exception:
-                    r_opts = []
-                r_sorted_opts = sorted([normalize_text_answer(o) for o in r_opts])
+    with _csv_write_lock:
+        if path.is_file():
+            with open(path, mode="r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    r_q = normalize_text_answer(row.get("question", ""))
+                    try:
+                        r_opts = json.loads(row.get("options_json", "[]"))
+                    except Exception:
+                        r_opts = []
+                    r_sorted_opts = sorted([normalize_text_answer(o) for o in r_opts])
 
-                if r_q == norm_q and (norm_type in ("text", "code") or r_sorted_opts == sorted_norm_opts):
-                    # Duplicate found -> update row in place
-                    matched_id = row.get("id")
-                    row["subject"] = subject
-                    row["q_type"] = norm_type
-                    row["question"] = question
-                    row["options_json"] = options_json
-                    row["expected_answer"] = expected
-                existing_rows.append(row)
+                    if r_q == norm_q and (norm_type in ("text", "code") or r_sorted_opts == sorted_norm_opts):
+                        # Duplicate found -> update row in place
+                        matched_id = row.get("id")
+                        row["subject"] = subject
+                        row["q_type"] = norm_type
+                        row["question"] = question
+                        row["options_json"] = options_json
+                        row["expected_answer"] = expected
+                    existing_rows.append(row)
 
-    if matched_id:
-        final_id = matched_id
-    else:
-        short_hash = hashlib.sha256(f"{subject}:{norm_type}:{question}".encode("utf-8")).hexdigest()[:8].upper()
-        final_id = f"REAL_{short_hash}"
-        existing_rows.append({
-            "id": final_id,
-            "subject": subject,
-            "q_type": norm_type,
-            "question": question,
-            "options_json": options_json,
-            "expected_answer": expected,
-        })
+        if matched_id:
+            final_id = matched_id
+        else:
+            short_hash = hashlib.sha256(f"{subject}:{norm_type}:{question}".encode("utf-8")).hexdigest()[:8].upper()
+            final_id = f"REAL_{short_hash}"
+            existing_rows.append({
+                "id": final_id,
+                "subject": subject,
+                "q_type": norm_type,
+                "question": question,
+                "options_json": options_json,
+                "expected_answer": expected,
+            })
 
-    fieldnames = ["id", "subject", "q_type", "question", "options_json", "expected_answer"]
-    with open(path, mode="w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in existing_rows:
-            writer.writerow({k: r.get(k, "") for k in fieldnames})
+        fieldnames = ["id", "subject", "q_type", "question", "options_json", "expected_answer"]
+        with open(path, mode="w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for r in existing_rows:
+                writer.writerow({k: r.get(k, "") for k in fieldnames})
 
     return True, final_id
 
@@ -489,6 +494,119 @@ _in_flight_locks: Dict[str, asyncio.Future] = {}
 _in_flight_mutex = asyncio.Lock()
 _recent_solved_coalesce: Dict[str, Tuple[float, SolveResponse, Dict[str, Any]]] = {}
 
+MAX_COALESCE_ENTRIES = 128
+COALESCE_TTL_SECONDS = 2.5
+
+
+def _prune_coalesce_cache(now: float) -> None:
+    """Evict expired coalesce entries (>2.5s) and enforce MAX_COALESCE_ENTRIES bound."""
+    expired_keys = [k for k, (ts, _, _) in _recent_solved_coalesce.items() if now - ts > COALESCE_TTL_SECONDS]
+    for k in expired_keys:
+        _recent_solved_coalesce.pop(k, None)
+
+    if len(_recent_solved_coalesce) > MAX_COALESCE_ENTRIES:
+        sorted_keys = sorted(_recent_solved_coalesce.keys(), key=lambda k: _recent_solved_coalesce[k][0])
+        excess = len(_recent_solved_coalesce) - MAX_COALESCE_ENTRIES
+        for k in sorted_keys[:excess]:
+            _recent_solved_coalesce.pop(k, None)
+
+
+def remap_response_to_follower_options(res: SolveResponse, follower_options: List[str]) -> SolveResponse:
+    """
+    Dynamically remap leader SolveResponse indices, answers, canonical keys, and permutation
+    indices to the follower request's visual options permutation.
+    """
+    if not follower_options or res.q_type not in ("mcq", "order", "multi"):
+        return res
+
+    norm_type = res.q_type.strip().lower()
+
+    if norm_type == "mcq":
+        target_text = res.selected_text or ""
+        if not target_text and res.selected_index is not None:
+            return res
+        target_norm = normalize_text_answer(str(target_text))
+        found_idx = None
+        for idx, opt in enumerate(follower_options):
+            if normalize_text_answer(opt) == target_norm:
+                found_idx = idx
+                break
+        if found_idx is None:
+            for idx, opt in enumerate(follower_options):
+                opt_norm = normalize_text_answer(opt)
+                if target_norm and (target_norm in opt_norm or opt_norm in target_norm):
+                    found_idx = idx
+                    break
+        if found_idx is not None:
+            remapped_answer = chr(65 + found_idx)
+            return res.model_copy(update={
+                "selected_index": found_idx,
+                "selected_text": follower_options[found_idx],
+                "answer": remapped_answer,
+            })
+        return res
+
+    elif norm_type == "order":
+        ordered_targets = res.ordered_texts or []
+        if not ordered_targets:
+            return res
+        used_indices: set = set()
+        remapped_indices: List[int] = []
+        for target_item in ordered_targets:
+            item_norm = normalize_text_answer(str(target_item))
+            found_i = None
+            for idx, opt in enumerate(follower_options):
+                if idx not in used_indices and normalize_text_answer(opt) == item_norm:
+                    found_i = idx
+                    break
+            if found_i is None:
+                for idx, opt in enumerate(follower_options):
+                    opt_n = normalize_text_answer(opt)
+                    if idx not in used_indices and item_norm and (item_norm in opt_n or opt_n in item_norm):
+                        found_i = idx
+                        break
+            if found_i is not None:
+                used_indices.add(found_i)
+                remapped_indices.append(found_i)
+
+        if len(remapped_indices) == len(follower_options):
+            letters = [chr(65 + i) for i in remapped_indices]
+            canonical_str = ",".join(letters)
+            return res.model_copy(update={
+                "permutation_indices": remapped_indices,
+                "ordered_texts": [follower_options[i] for i in remapped_indices],
+                "canonical_keys": canonical_str,
+                "answer": canonical_str,
+            })
+        return res
+
+    elif norm_type == "multi":
+        target_texts = res.selected_texts or []
+        if not target_texts:
+            return res
+        used_indices_multi = set()
+        remapped_indices_multi = []
+        for item in target_texts:
+            item_norm = normalize_text_answer(str(item))
+            for idx, opt in enumerate(follower_options):
+                if idx not in used_indices_multi and normalize_text_answer(opt) == item_norm:
+                    used_indices_multi.add(idx)
+                    remapped_indices_multi.append(idx)
+                    break
+        if remapped_indices_multi:
+            sorted_indices = sorted(remapped_indices_multi)
+            letters = [chr(65 + i) for i in sorted_indices]
+            canonical_str = ",".join(letters)
+            return res.model_copy(update={
+                "selected_indices": sorted_indices,
+                "selected_texts": [follower_options[i] for i in sorted_indices],
+                "canonical_keys": canonical_str,
+                "answer": canonical_str,
+            })
+        return res
+
+    return res
+
 
 async def _solve_core(
     req: SolveRequest,
@@ -518,7 +636,9 @@ async def _solve_core(
     )
 
     # 1. Order-Invariant Persistent Cache Lookup (unless bypassed)
-    if not req.bypass_cache:
+    if req.bypass_cache:
+        _recent_solved_coalesce.pop(c_key, None)
+    else:
         cached = get_cached_solution(
             subject=req.subject,
             q_type=req.q_type,
@@ -527,6 +647,7 @@ async def _solve_core(
             language=req.language,
             starter_code=req.starter_code,
             image_data=getattr(req, "image_data", None),
+            image_url=getattr(req, "image_url", None),
         )
         if cached:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -540,6 +661,7 @@ async def _solve_core(
 
         # 2. Coalesce check for rapid repeated requests (< 2.5s) to avoid duplicate solves on rapid double-clicks/DOM churn
         now_ts = time.time()
+        _prune_coalesce_cache(now_ts)
         recent = _recent_solved_coalesce.get(c_key)
         if recent is not None:
             ts, cached_res, cached_trace = recent
@@ -547,7 +669,8 @@ async def _solve_core(
                 if request is not None:
                     request.state.telemetry_logged = True
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                cloned_res = cached_res.model_copy(update={"latency_ms": round(elapsed_ms, 2), "cache_hit": True})
+                remapped_res = remap_response_to_follower_options(cached_res, req.options or [])
+                cloned_res = remapped_res.model_copy(update={"latency_ms": round(elapsed_ms, 2), "cache_hit": True})
                 return cloned_res, cached_trace
 
     # 3. In-Flight Coalescing: join existing solver if another coroutine is already solving this question
@@ -569,7 +692,8 @@ async def _solve_core(
             if request is not None:
                 request.state.telemetry_logged = True
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            cloned = leader_res.model_copy(update={"latency_ms": round(elapsed_ms, 2)})
+            remapped_leader = remap_response_to_follower_options(leader_res, req.options or [])
+            cloned = remapped_leader.model_copy(update={"latency_ms": round(elapsed_ms, 2)})
             return cloned, leader_trace
         except Exception:
             raise
@@ -655,6 +779,7 @@ async def _solve_core(
                 language=req.language,
                 starter_code=req.starter_code,
                 image_data=getattr(req, "image_data", None),
+                image_url=getattr(req, "image_url", None),
             )
 
         response = SolveResponse(
@@ -685,8 +810,16 @@ async def _solve_core(
             "agreement_details": dict(getattr(solver_res, "agreement_details", {}) or {}),
         }
 
-        # Update coalesce cache & resolve follower future
-        _recent_solved_coalesce[c_key] = (time.time(), response, trace)
+        # Update coalesce cache (only store high/medium confidence results, never uncertain/low-fallback)
+        if (
+            response.status == "ok"
+            and response.confidence_tier not in ("LOW_FALLBACK_RESCUE", "UNCERTAIN", None)
+            and not req.bypass_cache
+        ):
+            _recent_solved_coalesce[c_key] = (time.time(), response, trace)
+        else:
+            _recent_solved_coalesce.pop(c_key, None)
+
         if in_flight_future and not in_flight_future.done():
             in_flight_future.set_result((response, trace))
 
@@ -699,11 +832,7 @@ async def _solve_core(
     finally:
         async with _in_flight_mutex:
             _in_flight_locks.pop(c_key, None)
-            # Prune coalesce records older than 30s
-            now_prune = time.time()
-            stale_keys = [k for k, (t_record, _, _) in _recent_solved_coalesce.items() if now_prune - t_record > 30.0]
-            for k in stale_keys:
-                _recent_solved_coalesce.pop(k, None)
+            _prune_coalesce_cache(time.time())
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         model_name = ""
@@ -801,6 +930,8 @@ async def submit_feedback(req: FeedbackRequest) -> FeedbackResponse:
         notes=req.notes,
         language=req.language,
         starter_code=req.starter_code,
+        image_data=getattr(req, "image_data", None),
+        image_url=getattr(req, "image_url", None),
     )
 
     csv_exported = False
@@ -808,7 +939,8 @@ async def submit_feedback(req: FeedbackRequest) -> FeedbackResponse:
 
     if req.export_to_csv and req.correct_answer is not None:
         try:
-            csv_exported, csv_row_id = save_or_update_question_csv(
+            csv_exported, csv_row_id = await asyncio.to_thread(
+                save_or_update_question_csv,
                 subject=req.subject,
                 q_type=req.q_type,
                 question=req.question,

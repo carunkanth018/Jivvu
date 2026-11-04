@@ -180,6 +180,7 @@ def test_3_openrouter_429_sets_provider_cooldown_and_prevents_fanout():
     assert models == []
     assert details.get("error") == "RATE_LIMIT_429_COOLDOWN"
     mock_client.post.assert_not_called()
+    reset_provider_cooldown()
 
 
 # ==============================================================================

@@ -9,6 +9,18 @@
 (function () {
   "use strict";
 
+  if (typeof window !== "undefined" && window.__QUIZZY_EXTRACTOR_LOADED__ && window.QuizZyExtractor) {
+    const res = (typeof document !== "undefined" && typeof window.QuizZyExtractor.extractQuizFromDom === "function")
+      ? window.QuizZyExtractor.extractQuizFromDom()
+      : { success: false, error: "No document" };
+    Object.assign(res, window.QuizZyExtractor);
+    window.__QUIZZY_LAST_EXTRACTION__ = res;
+    return res;
+  }
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_EXTRACTOR_LOADED__ = true;
+  }
+
   /**
    * Detects proctored coding practice environments (such as learning.ccbp.in/question/*
    * or pages containing Monaco / Ace code editors) where aggressive anti-cheat MutationObservers
@@ -18,15 +30,42 @@
    */
   function isInsideCodeEditor(el) {
     if (!el) return false;
+
+    // NEVER reject MCQ option cards (A, B, C, D) or elements inside option cards
     if (typeof el.closest === "function") {
       try {
-        return !!el.closest('.monaco-editor, .ace_editor, .cm-editor, .CodeMirror, [class*="monaco-editor"], [class*="ace_editor"]');
+        const optionAncestor = el.closest(
+          "[class*='option' i], [class*='choice' i], [class*='radio' i], [class*='checkbox' i], [class*='card' i], " +
+          "label, li, [role='radio'], [role='option'], [role='checkbox'], [data-quiz-option], [data-rbd-draggable-id]"
+        );
+        if (optionAncestor) {
+          return false;
+        }
       } catch (_) {}
     }
+
+    // Read-only pre, code, or syntax highlighter containers are NEVER code editors
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "pre" || tag === "code") return false;
+
+    // Only full-page coding IDE workspaces (Monaco, Ace, CodeMirror) outside of option cards
+    if (typeof el.closest === "function") {
+      try {
+        const ideEditor = el.closest('.monaco-editor, .ace_editor, .cm-editor, .CodeMirror, [class*="monaco-editor"], [class*="ace_editor"]');
+        if (ideEditor) {
+          const isInsideOption = !!ideEditor.closest("[class*='option' i], [class*='choice' i], label, li, [role='radiogroup'], ul, ol");
+          return !isInsideOption;
+        }
+      } catch (_) {}
+    }
+
     let cur = el;
     while (cur) {
-      const cls = cur.className || "";
-      if (typeof cls === "string" && (cls.includes("monaco-editor") || cls.includes("ace_editor") || cls.includes("cm-editor") || cls.includes("CodeMirror"))) {
+      const cls = (cur.className || "").toString().toLowerCase();
+      if (cls.includes("option") || cls.includes("choice") || cls.includes("radio")) {
+        return false;
+      }
+      if (cls.includes("monaco-editor") || cls.includes("ace_editor") || cls.includes("cm-editor") || cls.includes("codemirror")) {
         return true;
       }
       cur = cur.parentElement;
@@ -77,9 +116,9 @@
       const checkboxes = allCheckboxes.filter(c => !isInsideCodeEditor(c) && !isQuizZyInternalElement(c));
       if (checkboxes.length >= 2) return true;
 
-      // 3. Check for option elements outside code editor (including styled-components option cards)
+      // 3. Check for option elements outside code editor (including styled-components option cards & draggable order cards)
       const candidateEls = doc.querySelectorAll ? Array.from(doc.querySelectorAll(
-        ".quiz-option, [data-quiz-option], [class*='radio-item'], [class*='option-item'], [class*='choice-item'], [role='radio'], [role='option'], [data-rbd-draggable-id], [class*='optionCard'], [class*='option-card']"
+        ".quiz-option, [data-quiz-option], [class*='radio-item'], [class*='option-item'], [class*='choice-item'], [role='radio'], [role='option'], [role='checkbox'], [data-rbd-draggable-id], [data-rfd-draggable-id], [draggable='true'], .draggable-item, .sortable-item, .order-item, [class*='optionCard'], [class*='option-card'], [class*='checkbox-item'], [class*='checkboxItem']"
       )) : [];
       const optionCandidates = candidateEls.filter(el => !isInsideCodeEditor(el) && !isQuizZyInternalElement(el) && isVisible(el));
       if (optionCandidates.length >= 2) return true;
@@ -112,7 +151,7 @@
    */
   function extractCodeLinesWithoutGutters(el) {
     if (!el) return [];
-    let clone;
+    let clone = null;
     try {
       clone = el.cloneNode(true);
       const gutterEls = clone.querySelectorAll(
@@ -121,33 +160,256 @@
       for (const g of gutterEls) {
         try { g.remove(); } catch (_) {}
       }
+
+      const raw = (clone.textContent || clone.innerText || "")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/\u00a0/g, " ");
+
+      const lines = raw.split("\n");
+      const result = [];
+      for (const line of lines) {
+        // Strip standalone leading line numbers (e.g. " 1  int maxDownPath" or "1: maxDownPath" or "1 | maxDownPath")
+        const stripped = line.replace(/^\s*\d{1,4}(?:\s*[:\|]\s*|\s{2,})/, "  ");
+        result.push(stripped);
+      }
+      return result;
     } catch (_) {
-      clone = el;
+      return [];
+    } finally {
+      if (clone && typeof clone.replaceChildren === "function") {
+        try { clone.replaceChildren(); } catch (_) {}
+      }
+      clone = null;
+    }
+  }
+
+  function cleanCodeSnippet(raw) {
+    if (!raw) return "";
+    // Strip Ace/Monaco dummy width-measurement probes (e.g. repeated XXXX... or Hebrew measurement chars)
+    const sanitized = String(raw)
+      .replace(/[\u0590-\u05FF]{3,}/g, "")
+      .replace(/([XMW0])\1{25,}/g, "");
+    const lines = sanitized.split("\n");
+    while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+    return lines.join("\n");
+  }
+
+  /**
+   * Dedicated clean code extraction on cloned node trees:
+   * 1. Strips gutter & line-number elements (.linenumber, .react-syntax-highlighter-line-number, .ace_gutter, .margin-view-overlays, .line-numbers, [class*='line-number'], [class*='linenumber'], [aria-hidden='true'] line counters).
+   * 2. Strips language header badges (/^(JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH|COPY|COPIED)$/i) & <button> elements.
+   * 3. When isOptionCard is true, strips single-character option badge labels ('A', 'B', 'C', 'D').
+   * 4. Virtualized editor fallback: reconstructs .ace_line / .view-line rows in order.
+   * 5. Uses textContent for full DOM text buffer without viewport clipping (scrollable/swipeable containers).
+   * 6. Strips sequential leading line-number patterns (e.g. '1 ', '2 ', '3 ').
+   */
+  function extractCleanCodeFromClonedNode(rootNode, isOptionCard = false) {
+    if (!rootNode) return "";
+    let clone = null;
+    try {
+      try {
+        clone = rootNode.cloneNode(true);
+      } catch (_) {
+        clone = rootNode;
+      }
+
+    // 1. Remove gutter, scrollbar, and line-number elements
+    try {
+      const gutterEls = clone.querySelectorAll(
+        ".linenumber, .react-syntax-highlighter-line-number, .ace_gutter, .ace_scrollbar, .ace_scrollbar-v, .ace_scrollbar-h, .ace_search, .ace_print-margin, textarea.ace_text-input, .margin-view-overlays, .line-numbers, [class*='line-number'], [class*='linenumber'], [class*='lineNumbers'], [class*='line_number']"
+      );
+      for (const g of gutterEls) {
+        try { g.remove(); } catch (_) {}
+      }
+
+      // Remove aria-hidden line counters or icons
+      const ariaHidden = clone.querySelectorAll("[aria-hidden='true']");
+      for (const ah of ariaHidden) {
+        const cls = (ah.className || "").toString().toLowerCase();
+        const txt = (ah.textContent || "").trim();
+        if (cls.includes("line") || cls.includes("gutter") || /^\d+$/.test(txt)) {
+          try { ah.remove(); } catch (_) {}
+        }
+      }
+
+      // 2-column table gutter removal (gutter <td> + code <td>)
+      const tableRows = clone.querySelectorAll ? Array.from(clone.querySelectorAll("tr")) : [];
+      for (const row of tableRows) {
+        const cells = row.querySelectorAll ? Array.from(row.querySelectorAll("td")) : [];
+        if (cells.length === 2) {
+          const firstText = (cells[0].textContent || "").trim();
+          const firstCls = (cells[0].className || "").toLowerCase();
+          if (/^\d+$/.test(firstText) || firstCls.includes("gutter") || firstCls.includes("line")) {
+            try { cells[0].remove(); } catch (_) {}
+          }
+        }
+      }
+
+      // Flex rows line-number removal (strip .linenumber or leading digit-only spans)
+      const flexLines = clone.querySelectorAll ? Array.from(clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine'], div[class*='line']")) : [];
+      for (const fl of flexLines) {
+        const firstSpan = fl.querySelector ? fl.querySelector("span") : null;
+        if (firstSpan) {
+          const sText = (firstSpan.textContent || "").trim();
+          const sCls = (firstSpan.className || "").toLowerCase();
+          if (/^\d+$/.test(sText) || sCls.includes("linenumber") || sCls.includes("line-number")) {
+            try { firstSpan.remove(); } catch (_) {}
+          }
+        }
+      }
+
+      // Ensure spacing between adjacent inline token elements (e.g. const express)
+      const codeRoots = clone.querySelectorAll ? Array.from(clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine'], tr, td, code, pre")) : [];
+      const scopeList = codeRoots.length > 0 ? codeRoots : [clone];
+      for (const scope of scopeList) {
+        const spans = scope.querySelectorAll ? Array.from(scope.querySelectorAll("span")) : [];
+        for (let i = 0; i < spans.length - 1; i++) {
+          const cur = spans[i];
+          const next = spans[i + 1];
+          const curText = cur.textContent || "";
+          const nextText = next.textContent || "";
+          if (/[a-zA-Z0-9_$]$/.test(curText) && /^[a-zA-Z0-9_$]/.test(nextText)) {
+            cur.textContent = curText + " ";
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Remove language header badges & action buttons (Copy, etc.)
+    try {
+      const badgeRegex = /^(JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH|COPY|COPIED)$/i;
+      const buttons = clone.querySelectorAll("button, [role='button'], .copy-btn, [class*='copy']");
+      for (const b of buttons) {
+        try { b.remove(); } catch (_) {}
+      }
+
+      const badges = clone.querySelectorAll("[class*='badge'], [class*='header'], [class*='lang'], [class*='title'], span, div");
+      for (const bg of badges) {
+        const txt = (bg.textContent || "").trim();
+        if (badgeRegex.test(txt) && txt.length <= 15) {
+          const children = bg.children || [];
+          if (children.length === 0 || Array.from(children).every(c => badgeRegex.test((c.textContent || "").trim()))) {
+            try { bg.remove(); } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3. Option Card Mode: Strip single-character option badges (A, B, C, D) without stripping single-char answers ('0', '1', 'A')
+    if (isOptionCard) {
+      try {
+        const inputs = clone.querySelectorAll("input[type='radio'], input[type='checkbox']");
+        for (const inp of inputs) {
+          try { inp.remove(); } catch (_) {}
+        }
+        const optionBadges = clone.querySelectorAll("[class*='badge'], [class*='label'], [class*='letter'], [class*='index'], [class*='prefix'], [class*='choice'], span, div, b, strong");
+        let strippedBadge = false;
+        for (const ob of optionBadges) {
+          if (strippedBadge) break;
+          const obTag = (ob.tagName || "").toLowerCase();
+          if (obTag === "code" || obTag === "pre" || (ob.querySelector && ob.querySelector("code, pre"))) continue;
+          const txt = (ob.textContent || "").trim();
+          const fullCloneTxt = (clone.textContent || "").trim();
+          const hasExplicitBadgeCls = /badge|letter|index|prefix/i.test(String(ob.className || ""));
+          if ((/^[A-Pa-p0-9][\.\:\)]\s*$/.test(txt) || (hasExplicitBadgeCls && /^[A-Pa-p0-9][\.\:\)\s]*$/.test(txt))) && fullCloneTxt.length > txt.length) {
+            try {
+              ob.remove();
+              strippedBadge = true;
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
     }
 
-    const raw = (clone.textContent || clone.innerText || "")
+    // 4. Virtualized Editor Fallback (Ace / Monaco)
+    let extractedText = "";
+    try {
+      const monacoEditor = clone.querySelector(".monaco-editor, [class*='monaco-editor']");
+      if (monacoEditor) {
+        const viewLines = Array.from(monacoEditor.querySelectorAll(".view-lines .view-line, .view-line"));
+        if (viewLines.length > 0) {
+          const sorted = viewLines.slice().sort((a, b) => {
+            const topA = parseFloat(a.style && a.style.top ? a.style.top : "0");
+            const topB = parseFloat(b.style && b.style.top ? b.style.top : "0");
+            return topA - topB;
+          });
+          extractedText = sorted.map(l => (l.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+        }
+      }
+
+      if (!extractedText) {
+        const aceEditor = clone.querySelector(".ace_editor, [class*='ace_editor']");
+        if (aceEditor) {
+          const aceLines = Array.from(aceEditor.querySelectorAll(".ace_text-layer .ace_line"));
+          if (aceLines.length > 0) {
+            extractedText = aceLines.map(l => (l.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 5. Full textContent reading for unclipped buffer
+    if (!extractedText) {
+      const lineWrappers = Array.from(clone.querySelectorAll(".react-syntax-highlighter > span, pre > code > span, [class*='code-line'], [class*='codeLine']"));
+      if (lineWrappers.length >= 2) {
+        extractedText = lineWrappers.map(w => (w.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "")).join("\n");
+      } else {
+        extractedText = (clone.textContent || clone.innerText || "");
+      }
+    }
+
+    // 6. Text normalization & leading line number sequence stripping
+    const clean = (extractedText || "")
       .replace(/[\u200B-\u200D\uFEFF]/g, "")
       .replace(/\r\n/g, "\n")
       .replace(/\r/g, "\n")
       .replace(/\u00a0/g, " ");
 
-    const lines = raw.split("\n");
-    const result = [];
-    for (const line of lines) {
-      // Strip standalone leading line numbers (e.g. " 1  int maxDownPath" or "1: maxDownPath" or "1 | maxDownPath")
-      const stripped = line.replace(/^\s*\d{1,4}(?:\s*[:\|]\s*|\s{2,})/, "  ");
-      result.push(stripped);
-    }
-    return result;
-  }
-
-  function cleanCodeSnippet(raw) {
-    if (!raw) return "";
-    const lines = raw.split("\n");
+    const lines = clean.split("\n");
     while (lines.length > 0 && lines[0].trim() === "") lines.shift();
     while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
-    return lines.join("\n");
+
+    if (lines.length === 0) return "";
+
+    const numPrefixedLines = lines.filter(l => /^\s*\d{1,4}\s*[:\|\.]?\s+/.test(l));
+    const shouldStripLeadingLineNumbers = numPrefixedLines.length >= Math.max(1, Math.floor(lines.length * 0.6));
+
+    const finalLines = [];
+    for (let i = 0; i < lines.length; i++) {
+      let l = lines[i];
+      if (shouldStripLeadingLineNumbers) {
+        l = l.replace(/^\s*\d{1,4}\s*[:\|\.]?\s+/, "");
+      } else {
+        l = l.replace(/^\s*\d{1,4}(?:\s*[:\|]\s*|\s{2,})/, "  ");
+      }
+      finalLines.push(l);
+    }
+
+    while (finalLines.length > 0 && finalLines[0].trim() === "") finalLines.shift();
+    while (finalLines.length > 0 && finalLines[finalLines.length - 1].trim() === "") finalLines.pop();
+
+    let result = finalLines.join("\n");
+    if (isOptionCard) {
+      if (typeof stripDecorativePrefix === "function") {
+        const stripped = stripDecorativePrefix(result);
+        if (stripped.length > 0) result = stripped;
+      }
+      const afterPrefix = result.replace(/^[A-Pa-p0-9][\.\:\)]\s*/, "");
+      if (afterPrefix.trim().length > 0) {
+        result = afterPrefix;
+      }
+    }
+    return result.trim();
+  } finally {
+    if (clone && clone !== rootNode && typeof clone.replaceChildren === "function") {
+      try { clone.replaceChildren(); } catch (_) {}
+    }
+    clone = null;
   }
+}
 
   /**
    * Complete Scrollable / Swipeable Code Box Extractor.
@@ -155,11 +417,27 @@
    * located inside or adjacent to the question container.
    * Steps virtualized scrollers, strips line-number gutters, and captures multi-line code.
    */
-  function extractFullCodeSnippets(containerEl, docRef) {
+  function nodeContains(parent, child) {
+    if (!parent || !child) return false;
+    if (parent === child) return true;
+    if (typeof parent.contains === "function") {
+      try { return parent.contains(child); } catch (_) {}
+    }
+    let cur = child.parentElement || child.parentNode;
+    while (cur) {
+      if (cur === parent) return true;
+      cur = cur.parentElement || cur.parentNode;
+    }
+    return false;
+  }
+
+  function extractFullCodeSnippets(containerEl, docRef, excludeElements = []) {
     const doc = docRef || (typeof document !== "undefined" ? document : null);
     if (!doc) return "";
 
     const snippets = [];
+    const excluded = Array.isArray(excludeElements) ? excludeElements : [];
+    const isExcluded = (el) => excluded.some(ex => ex && (ex === el || nodeContains(ex, el)));
 
     try {
       const root = containerEl || doc;
@@ -183,7 +461,31 @@
           const scroller = editor.querySelector(".ace_scroller") || editor;
           const textLayer = editor.querySelector(".ace_text-layer");
           if (scroller && textLayer) {
-            const linesCollected = new Set();
+            const linesCollected = [];
+            const appendWindowLines = (stepLines) => {
+              const nonEmpty = stepLines.filter(l => l.trim().length > 0);
+              if (nonEmpty.length === 0) return;
+              if (linesCollected.length === 0) {
+                linesCollected.push(...nonEmpty);
+                return;
+              }
+              let overlap = 0;
+              const maxK = Math.min(linesCollected.length, nonEmpty.length);
+              for (let k = maxK; k >= 1; k--) {
+                let match = true;
+                for (let idx = 0; idx < k; idx++) {
+                  if (linesCollected[linesCollected.length - k + idx].trim() !== nonEmpty[idx].trim()) {
+                    match = false;
+                    break;
+                  }
+                }
+                if (match) {
+                  overlap = k;
+                  break;
+                }
+              }
+              linesCollected.push(...nonEmpty.slice(overlap));
+            };
             const origTop = scroller.scrollTop;
             const origLeft = scroller.scrollLeft;
             const clientH = scroller.clientHeight || 200;
@@ -191,19 +493,17 @@
 
             for (let top = 0; top <= scrollH; top += Math.max(40, clientH * 0.75)) {
               try { scroller.scrollTop = top; } catch (_) {}
-              const renderedLines = Array.from(textLayer.querySelectorAll(".ace_line"));
-              for (const lineEl of renderedLines) {
-                const t = (lineEl.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, "");
-                if (t.trim()) linesCollected.add(t);
-              }
+              const renderedLines = Array.from(textLayer.querySelectorAll(".ace_line"))
+                .map(lineEl => (lineEl.textContent || "").replace(/\u00a0/g, " ").replace(/\r/g, ""));
+              appendWindowLines(renderedLines);
             }
             try {
               scroller.scrollTop = origTop;
               scroller.scrollLeft = origLeft;
             } catch (_) {}
 
-            if (linesCollected.size > 0) {
-              code = Array.from(linesCollected).join("\n");
+            if (linesCollected.length > 0) {
+              code = linesCollected.join("\n");
             }
           }
         }
@@ -265,24 +565,53 @@
 
       // 4. Scrollable / Swipeable Code Containers, Prism, pre, code blocks
       const codeBoxes = Array.from(root.querySelectorAll ? root.querySelectorAll(
-        "pre, code, .prism-code, [class*='code-block'], [class*='code-container'], [class*='codeBlock'], [class*='codeContainer'], [class*='syntax-highlighter'], [class*='highlight']"
+        "pre, code, .prism-code, [class*='code-block'], [class*='code-container'], [class*='codeBlock'], [class*='codeContainer'], [class*='syntax-highlighter'], [class*='highlight'], [class*='swipe' i]"
       ) : []).filter(el => {
         if (!isVisible(el)) return false;
         if (isInsideCodeEditor(el)) return false;
-        const txt = (el.textContent || "").trim();
-        return txt.length >= 15 && (txt.includes("\n") || txt.includes("{") || txt.includes(";") || txt.includes("def ") || txt.includes("function") || txt.includes("class "));
+        if (isExcluded(el)) return false;
+        const tag = (el.tagName || "").toLowerCase();
+        const txt = (el.textContent || el.innerText || "").trim();
+        if (tag === "pre" || tag === "code") {
+          return txt.length >= 2;
+        }
+        return txt.length >= 10 && (txt.includes("\n") || txt.includes("{") || txt.includes(";") || txt.includes("def ") || txt.includes("function") || txt.includes("class ") || txt.includes("=") || txt.includes("("));
       });
 
       for (const box of codeBoxes) {
-        if (codeBoxes.some(parent => parent !== box && parent.contains(box))) continue;
+        if (codeBoxes.some(parent => parent !== box && nodeContains(parent, box))) continue;
 
         let harvestedCode = "";
-        const scroller = (box.scrollHeight > box.clientHeight + 5 || box.scrollWidth > box.clientWidth + 5)
+        const scroller = (box.scrollHeight > (box.clientHeight || 0) + 5 || box.scrollWidth > (box.clientWidth || 0) + 5)
           ? box
-          : (box.parentElement && (box.parentElement.scrollHeight > box.parentElement.clientHeight + 5) ? box.parentElement : null);
+          : (box.parentElement && (box.parentElement.scrollHeight > (box.parentElement.clientHeight || 0) + 5) ? box.parentElement : null);
 
-        if (scroller && scroller.scrollHeight > scroller.clientHeight + 10) {
-          const linesSet = new Set();
+        if (scroller && scroller.scrollHeight > (scroller.clientHeight || 0) + 10 && scroller.clientHeight > 0) {
+          const linesList = [];
+          const appendWindowLines = (stepLines) => {
+            const nonEmpty = stepLines.filter(l => l.trim().length > 0);
+            if (nonEmpty.length === 0) return;
+            if (linesList.length === 0) {
+              linesList.push(...nonEmpty);
+              return;
+            }
+            let overlap = 0;
+            const maxK = Math.min(linesList.length, nonEmpty.length);
+            for (let k = maxK; k >= 1; k--) {
+              let match = true;
+              for (let idx = 0; idx < k; idx++) {
+                if (linesList[linesList.length - k + idx].trim() !== nonEmpty[idx].trim()) {
+                  match = false;
+                  break;
+                }
+              }
+              if (match) {
+                overlap = k;
+                break;
+              }
+            }
+            linesList.push(...nonEmpty.slice(overlap));
+          };
           const origTop = scroller.scrollTop;
           const origLeft = scroller.scrollLeft;
           const clientH = scroller.clientHeight || 200;
@@ -291,25 +620,26 @@
           for (let top = 0; top <= scrollH; top += Math.max(30, clientH * 0.75)) {
             try { scroller.scrollTop = top; } catch (_) {}
             const textNodes = extractCodeLinesWithoutGutters(box);
-            for (const l of textNodes) {
-              if (l.trim()) linesSet.add(l);
-            }
+            appendWindowLines(textNodes);
           }
           try {
             scroller.scrollTop = origTop;
             scroller.scrollLeft = origLeft;
           } catch (_) {}
 
-          if (linesSet.size > 0) {
-            harvestedCode = Array.from(linesSet).join("\n");
+          if (linesList.length > 0) {
+            harvestedCode = linesList.join("\n");
           }
         }
 
         if (!harvestedCode) {
           harvestedCode = extractCodeLinesWithoutGutters(box).join("\n");
         }
+        if (!harvestedCode) {
+          harvestedCode = extractCleanCodeFromClonedNode(box, false);
+        }
 
-        if (harvestedCode && harvestedCode.trim().length >= 15) {
+        if (harvestedCode && harvestedCode.trim().length >= 2) {
           const clean = cleanCodeSnippet(harvestedCode);
           if (clean && !snippets.includes(clean)) {
             snippets.push(clean);
@@ -668,6 +998,54 @@
   }
 
   /**
+   * Identifies navbar logos, user avatars, college banners, or decorative icons
+   * so they are never emitted as [Image: ...] stem text or extracted as question diagrams.
+   */
+  function isDecorativeOrNavbarImage(imgEl) {
+    if (!imgEl) return true;
+    try {
+      const alt = String((imgEl.getAttribute && (imgEl.getAttribute("alt") || imgEl.getAttribute("title") || imgEl.getAttribute("aria-label"))) || imgEl.alt || "").toLowerCase();
+      const cls = String((imgEl.getAttribute && imgEl.getAttribute("class")) || imgEl.className || "").toLowerCase();
+      const id = String((imgEl.getAttribute && imgEl.getAttribute("id")) || imgEl.id || "").toLowerCase();
+      const rawSrc = String(imgEl.currentSrc || imgEl.src || (imgEl.getAttribute && (imgEl.getAttribute("data-src") || imgEl.getAttribute("src"))) || "").toLowerCase();
+
+      if (/\b(?:logo|avatar|profile|user[-_\s]*pic|profile[-_\s]*pic|banner|header|brand|spacer|badge|button|chalapathy|institute|college|university|nxtwave)\b/i.test(alt)) {
+        return true;
+      }
+      if (/\b(?:logo|avatar|profile|navbar|topbar|header[-_]?logo|brand|spacer)\b/i.test(cls + " " + id)) {
+        return true;
+      }
+      if (
+        rawSrc.includes("logo") ||
+        rawSrc.includes("avatar") ||
+        rawSrc.includes("icon") ||
+        rawSrc.includes("banner") ||
+        rawSrc.includes("header") ||
+        rawSrc.includes("brand") ||
+        rawSrc.includes("profile") ||
+        rawSrc.includes("user") ||
+        rawSrc.includes("spacer") ||
+        rawSrc.includes("badge") ||
+        rawSrc.includes("button")
+      ) {
+        return true;
+      }
+      if (imgEl.closest && imgEl.closest("header, nav, [role='navigation'], [role='banner'], [class*='navbar' i], [class*='topbar' i], [class*='app-header' i], [class*='header-bar' i], [class*='profile' i], [class*='avatar' i]")) {
+        return true;
+      }
+      // Check if immediate parent/row contains student ID or topbar navigation markers
+      const parentEl = imgEl.parentElement;
+      if (parentEl) {
+        const parentText = String(parentEl.textContent || "");
+        if (/\bID\s*:\s*[A-Z0-9]{6,}|\bEND\s*PRACTICE\b|\bQUESTIONS?\s*ATTEMPTED\b/i.test(parentText) && parentText.length < 250) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /**
    * Scans question container for visual diagrams (SVG trees, graphs, canvas, or img)
    * and extracts both structured topology summary (nodes, edges, longest path)
    * and raster image data / URLs. Never emits data:image/svg+xml as image_data.
@@ -684,15 +1062,15 @@
     }
 
     try {
+      const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
       const svgs = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("svg") : []).filter(s => {
         try {
           const rect = s.getBoundingClientRect ? s.getBoundingClientRect() : { width: 0, height: 0 };
-          if (rect.width < 50 || rect.height < 50) return false;
+          if (rect.width < 48 || rect.height < 48) return false;
           const cls = (s.getAttribute ? (s.getAttribute("class") || "") : "").toLowerCase();
           if (cls.includes("icon") || cls.includes("btn") || cls.includes("check") || cls.includes("arrow") || cls.includes("close")) return false;
-          // Real diagrams usually contain multiple graphic elements (nodes, edges, shapes)
-          const shapes = s.querySelectorAll ? s.querySelectorAll("circle, line, path, text, rect") : [];
-          return shapes.length >= 3;
+          const shapes = s.querySelectorAll ? s.querySelectorAll("circle, line, path, text, rect, polygon, polyline") : [];
+          return shapes.length >= 2;
         } catch (_) {
           return true;
         }
@@ -703,21 +1081,7 @@
           const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : { width: 0, height: 0 };
           const w = img.naturalWidth || rect.width || 0;
           const h = img.naturalHeight || rect.height || 0;
-          const src = (img.getAttribute ? (img.getAttribute("src") || "") : (img.src || "")).toLowerCase();
-          const isDecorative = (
-            src.includes("logo") ||
-            src.includes("avatar") ||
-            src.includes("icon") ||
-            src.includes("banner") ||
-            src.includes("header") ||
-            src.includes("brand") ||
-            src.includes("profile") ||
-            src.includes("user") ||
-            src.includes("spacer") ||
-            src.includes("badge") ||
-            src.includes("button")
-          );
-          return (w >= 50 && h >= 40) && !isDecorative;
+          return (w >= 36 && h >= 36) && !isDecorativeOrNavbarImage(img);
         } catch (_) {
           return true;
         }
@@ -726,7 +1090,7 @@
       const canvases = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("canvas") : []).filter(c => {
         try {
           const rect = c.getBoundingClientRect ? c.getBoundingClientRect() : { width: 0, height: 0 };
-          return rect.width >= 40 && rect.height >= 40;
+          return (rect.width >= 36 || c.width >= 36) && (rect.height >= 36 || c.height >= 36);
         } catch (_) {
           return true;
         }
@@ -734,22 +1098,36 @@
 
       let image_data = null;
       let image_url = null;
+      let svg_data = null;
       let diagram_structure = null;
       let bounding_box = null;
 
-      // 1. Process SVG (extract full node + edge topology)
+      // 1. Process SVG
       if (svgs.length > 0) {
         const targetSvg = svgs[0];
         try {
           if (typeof targetSvg.getBoundingClientRect === "function") {
             const rect = targetSvg.getBoundingClientRect();
-            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+            bounding_box = { x: rect.left, y: rect.top, top: rect.top, left: rect.left, width: rect.width, height: rect.height, dpr: dpr };
+          }
+          if (typeof XMLSerializer !== "undefined") {
+            let clonedSvg = null;
+            try {
+              clonedSvg = targetSvg.cloneNode ? targetSvg.cloneNode(true) : null;
+              const svgXml = new XMLSerializer().serializeToString(clonedSvg || targetSvg);
+              if (svgXml) {
+                svg_data = "data:image/svg+xml;base64," + (typeof btoa === "function" ? btoa(unescape(encodeURIComponent(svgXml))) : "");
+              }
+            } finally {
+              if (clonedSvg && typeof clonedSvg.replaceChildren === "function") {
+                try { clonedSvg.replaceChildren(); } catch (_) {}
+              }
+              clonedSvg = null;
+            }
           }
         } catch (_) {}
 
         diagram_structure = extractSvgGraphTopology(targetSvg);
-        // Note: Do NOT serialize to data:image/svg+xml! Vision APIs reject SVG with HTTP 400.
-        // Bounding box is recorded so background.js can crop a clean PNG tab capture if needed.
       }
 
       // 2. Process IMG
@@ -758,11 +1136,13 @@
         try {
           if (typeof targetImg.getBoundingClientRect === "function") {
             const rect = targetImg.getBoundingClientRect();
-            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+            const w = targetImg.naturalWidth || rect.width;
+            const h = targetImg.naturalHeight || rect.height;
+            bounding_box = { x: rect.left, y: rect.top, top: rect.top, left: rect.left, width: rect.width || w, height: rect.height || h, dpr: dpr };
           }
         } catch (_) {}
 
-        let rawSrc = (targetImg.getAttribute ? targetImg.getAttribute("src") : targetImg.src) || targetImg.src || "";
+        let rawSrc = targetImg.currentSrc || targetImg.src || (targetImg.getAttribute ? (targetImg.getAttribute("data-src") || targetImg.getAttribute("src")) : "") || "";
         const src = decodePotentialUrl(rawSrc);
         if (src.startsWith("data:image/png") || src.startsWith("data:image/jpeg") || src.startsWith("data:image/webp")) {
           image_data = src;
@@ -781,7 +1161,7 @@
                 image_data = dataUrl;
               }
             } catch (_) {
-              // CORS SecurityError: image_data remains null, image_url is fetched by background/backend
+              // CORS SecurityError: image_data remains null, background.js hydrates via privileged fetch / tab capture
             }
           }
         }
@@ -793,7 +1173,7 @@
         try {
           if (typeof targetCanvas.getBoundingClientRect === "function") {
             const rect = targetCanvas.getBoundingClientRect();
-            bounding_box = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+            bounding_box = { x: rect.left, y: rect.top, top: rect.top, left: rect.left, width: rect.width, height: rect.height, dpr: dpr };
           }
           if (typeof targetCanvas.toDataURL === "function") {
             image_data = targetCanvas.toDataURL("image/png");
@@ -801,7 +1181,29 @@
         } catch (_) {}
       }
 
-      return { image_data, image_url, diagram_structure, bounding_box };
+      // 4. Process CSS background-image container
+      if (!image_data && !image_url) {
+        const bgEls = Array.from(containerEl.querySelectorAll ? containerEl.querySelectorAll("[style*='background-image'], [style*='background']") : []);
+        for (const el of bgEls) {
+          const style = (el.getAttribute && el.getAttribute("style")) || "";
+          const bgMatch = style.match(/background(?:-image)?\s*:\s*url\(['"]?([^'"\)]+)['"]?\)/i);
+          if (bgMatch && bgMatch[1]) {
+            const bgUrl = decodePotentialUrl(bgMatch[1]);
+            if (bgUrl.startsWith("http://") || bgUrl.startsWith("https://") || bgUrl.startsWith("data:image/")) {
+              if (bgUrl.startsWith("data:image/")) {
+                image_data = bgUrl;
+              } else {
+                image_url = bgUrl;
+              }
+              const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, left: 0, width: 0, height: 0 };
+              bounding_box = { x: rect.left, y: rect.top, top: rect.top, left: rect.left, width: rect.width, height: rect.height, dpr: dpr };
+              break;
+            }
+          }
+        }
+      }
+
+      return { image_data, image_url, svg_data, diagram_structure, bounding_box, image_bbox: bounding_box };
     } catch (_) {
       return { image_data: null, image_url: null, diagram_structure: null, bounding_box: null };
     }
@@ -974,13 +1376,13 @@
     s = s.replace(/^[1-8]\s*(?=[A-Za-z`"'\<\(])/, "");
 
     // 1. Parenthesized/bracketed prefix: (A) 1/6, [B] option, (1) text
-    s = s.replace(/^(?:\(\s*[A-Fa-f0-9]{1,2}\s*\)|\[\s*[A-Fa-f0-9]{1,2}\s*\])\s+/, "");
+    s = s.replace(/^(?:\(\s*[A-Pa-p0-9]{1,2}\s*\)|\[\s*[A-Pa-p0-9]{1,2}\s*\])\s+/, "");
 
-    // 2. Letter prefix [A-Fa-f] followed immediately by . or ) or : and whitespace:
+    // 2. Letter prefix [A-Pa-p] followed immediately by . or ) or : and whitespace:
     // e.g., 'A. foo', 'b) bar', 'C: baz'
     // Requires immediate attachment (no space before delimiter) and trailing whitespace (\s+)
     // to strictly preserve 'A : B', 'A - B', 'x : y', and single letter 'A'
-    s = s.replace(/^[A-Fa-f][\.\)\:]\s+/, "");
+    s = s.replace(/^[A-Pa-p][\.\)\:]\s+/, "");
 
     // 3. Digit prefix 1-99 followed immediately by . or ) and whitespace:
     // e.g., '1. 1/6', '2) option'
@@ -1046,20 +1448,68 @@
   }
 
   /**
-   * Checks if an element is visible in the layout.
+   * Checks if an element is visible in the layout with fast pre-filtering and WeakMap caching.
    */
+  let _extractorVisibilityCache = (typeof WeakMap !== "undefined") ? new WeakMap() : null;
+
+  function isInsideSwipeableOrScrollableContainer(el) {
+    if (!el || el.nodeType !== 1) return false;
+    let cur = el;
+    let depth = 0;
+    while (cur && cur.nodeType === 1 && depth < 12) {
+      const tag = (cur.tagName || "").toLowerCase();
+      if (tag === "pre" || tag === "code") return true;
+      const cls = String(cur.className || "");
+      if (/(?:swipe|scroll|carousel|slider|code-block|code-container|codeBlock|codeContainer|syntax-highlighter|prism|ace_editor|monaco-editor)/i.test(cls)) {
+        return true;
+      }
+      if ((typeof cur.scrollWidth === "number" && cur.scrollWidth > 0 && cur.scrollWidth > (cur.clientWidth || 0)) ||
+          (typeof cur.scrollHeight === "number" && cur.scrollHeight > 0 && cur.scrollHeight > (cur.clientHeight || 0))) {
+        return true;
+      }
+      if (cur.style && (/auto|scroll|hidden/i.test(cur.style.overflowX || "") || /auto|scroll/i.test(cur.style.overflowY || ""))) {
+        return true;
+      }
+      if (typeof window !== "undefined" && window.getComputedStyle) {
+        try {
+          const st = window.getComputedStyle(cur);
+          if (st && (/auto|scroll|hidden/i.test(st.overflowX || "") || /auto|scroll/i.test(st.overflowY || ""))) {
+            return true;
+          }
+        } catch (_) {}
+      }
+      cur = cur.parentElement;
+      depth++;
+    }
+    return false;
+  }
+
   function isVisible(el) {
-    if (!el) return false;
+    if (!el || el.nodeType !== 1) return false;
     if (isQuizZyInternalElement(el)) return false;
-    if (el.hidden) return false;
+    if (el.hidden || (typeof el.getAttribute === "function" && el.getAttribute("aria-hidden") === "true")) return false;
+    if (el.style && (el.style.display === "none" || el.style.visibility === "hidden")) {
+      return false;
+    }
+    const hasScrollDimensions = (typeof el.scrollWidth === "number" && el.scrollWidth > 0) ||
+                                (typeof el.scrollHeight === "number" && el.scrollHeight > 0);
+    const inSwipeable = isInsideSwipeableOrScrollableContainer(el);
+    if (el.style && el.style.opacity === "0" && !inSwipeable && !hasScrollDimensions) {
+      return false;
+    }
+    if (_extractorVisibilityCache && _extractorVisibilityCache.has(el)) {
+      return _extractorVisibilityCache.get(el);
+    }
     if (typeof window !== "undefined" && window.getComputedStyle) {
       try {
         const style = window.getComputedStyle(el);
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+        if (style && (style.display === "none" || style.visibility === "hidden" || (style.opacity === "0" && !inSwipeable && !hasScrollDimensions))) {
+          if (_extractorVisibilityCache) _extractorVisibilityCache.set(el, false);
           return false;
         }
       } catch (e) {}
     }
+    if (_extractorVisibilityCache) _extractorVisibilityCache.set(el, true);
     return true;
   }
 
@@ -1181,8 +1631,11 @@
 
       // Deep scan images: extract alt, title, aria-label, or filename for diagram / formula / photo questions and options
       if (tag === "img") {
+        if (isDecorativeOrNavbarImage(node)) {
+          return "";
+        }
         const alt = node.getAttribute ? (node.getAttribute("alt") || node.getAttribute("title") || node.getAttribute("aria-label")) : null;
-        if (alt && alt.trim()) {
+        if (alt && alt.trim() && !/^(?:image|img|photo|picture)$/i.test(alt.trim())) {
           return " [Image: " + cleanText(alt) + "] ";
         }
         let src = node.getAttribute ? (node.getAttribute("src") || node.getAttribute("data-src")) : null;
@@ -1193,6 +1646,9 @@
             return " [Image: " + cleanText(parts) + "] ";
           }
           return " [Image: " + cleanText(src) + "] ";
+        }
+        if (alt && alt.trim()) {
+          return " [Image: " + cleanText(alt) + "] ";
         }
         return " [Image] ";
       }
@@ -1247,10 +1703,12 @@
         for (let i = 0; i < node.childNodes.length; i++) {
           text += walk(node.childNodes[i]);
         }
-      } else {
+      } else if (node.firstChild) {
         for (let child = node.firstChild; child; child = child.nextSibling) {
           text += walk(child);
         }
+      } else {
+        text = node.textContent || node.innerText || "";
       }
       return text;
     }
@@ -1286,7 +1744,10 @@
     }
 
     // Top-bar navigation, controls, scores, instructions, CCBP student ID & disclaimers
-    if (/^(?:mcq\s*practice|practice\s*instructions|end\s*practice|end\s*test|submit\s*test|score\s*:\s*\d+|questions?\s*attempted\s*:\s*\d+|time\s*left|timer\s*:|id\s*:\s*[A-Za-z0-9]+)/i.test(t)) {
+    if (/^(?:[iⓘ]\s*)?(?:mcq\s*practice|practice\s*instructions|end\s*practice|end\s*test|submit\s*test|classroom\s*quiz|score\s*:\s*\d+|questions?\s*(?:attempted|asked)\s*:\s*\d+|time\s*left|timer\s*:|id\s*:\s*[A-Za-z0-9]+)/i.test(t)) {
+      return true;
+    }
+    if (t.length < 90 && /\bID\s*:\s*[A-Z0-9]{6,}\s*$/i.test(t)) {
       return true;
     }
 
@@ -1319,8 +1780,8 @@
    */
   function containsActionButtonOrFooter(el) {
     if (!el || el.nodeType !== 1) return false;
-    const actionPattern = /^(?:SHOW ANSWER|HIDE ANSWER|SUBMIT|SUBMIT ANSWER|SKIP|NEXT|NEXT QUESTION|PREVIOUS|END PRACTICE|PRACTICE INSTRUCTIONS|HINT|REPORT|CHECK|FINISH|VIEW REPORT|PLEASE SELECT AN OPTION|PLEASE SELECT AN ANSWER|SELECT AN OPTION|SELECT AN ANSWER)$/;
-    const footerKeywords = /(?:IF YOU SKIP, YOU CAN ATTEMPT|QUESTIONS ATTEMPTED|END PRACTICE|PRACTICE INSTRUCTIONS|PLEASE SELECT AN OPTION|PLEASE SELECT AN ANSWER|SELECT AN OPTION)/;
+    const actionPattern = /^(?:SHOW ANSWER|HIDE ANSWER|SUBMIT|SUBMIT ANSWER|SKIP|NEXT|NEXT QUESTION|PREVIOUS|END PRACTICE|HINT|REPORT|CHECK|FINISH|VIEW REPORT|PLEASE SELECT AN OPTION|PLEASE SELECT AN ANSWER|SELECT AN OPTION|SELECT AN ANSWER)$/;
+    const footerKeywords = /(?:IF YOU SKIP, YOU CAN ATTEMPT|QUESTIONS ATTEMPTED|END PRACTICE|PLEASE SELECT AN OPTION|PLEASE SELECT AN ANSWER|SELECT AN OPTION)/;
 
     const elText = cleanText(el.textContent || el.innerText || "").toUpperCase();
     if (actionPattern.test(elText) || footerKeywords.test(elText)) {
@@ -1445,7 +1906,9 @@
       while (curr && curr !== doc.body && curr !== doc.documentElement) {
         if (isQuizZyInternalElement(curr)) break;
         const currText = curr.textContent || "";
-        const hasTopNavMarkers = /mcq\s*practice|end\s*practice|questions?\s*attempted|practice\s*instructions/i.test(currText);
+        const hasTopNavMarkers =
+          /end\s*practice|end\s*test|submit\s*test|questions?\s*attempted|questions?\s*asked|classroom\s*quiz|\bID\s*:\s*[A-Z0-9]{6,}/i.test(currText) ||
+          (/mcq\s*practice/i.test(currText) && !/practice\s*instructions/i.test(currText));
         if (hasTopNavMarkers) {
           // Reached or surpassed page wrapper enclosing the navbar; stop here!
           break;
@@ -1524,7 +1987,7 @@
         return true;
       });
 
-      if (optionRows.length < 2 || optionRows.length > 8) continue;
+      if (optionRows.length < 2 || optionRows.length > 16) continue;
 
       // All option rows should share the same tag name
       const firstTag = (optionRows[0].tagName || "").toLowerCase();
@@ -1652,7 +2115,7 @@
       }
     }
 
-    return (finalElements.length >= 2 && finalElements.length <= 6) ? finalElements : withoutContainers;
+    return (finalElements.length >= 2 && finalElements.length <= 16) ? finalElements : withoutContainers;
   }
 
   /**
@@ -2022,6 +2485,9 @@
    * @returns {Object} Extracted payload { success, subject, q_type, question, options, meta }
    */
   function extractQuizFromDom(customSelectors = {}, forcedQType = "auto") {
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_LAST_OPTION_ELEMENTS__ = [];
+    }
     const doc = (typeof document !== "undefined") ? document : null;
     if (!doc) {
       return { success: false, error: "No document object available for extraction." };
@@ -2114,12 +2580,13 @@
       const validRows = [];
       for (const r of allRadios) {
         const lbl = r.closest("label") || (r.id ? doc.querySelector(`label[for="${r.id}"]`) : null);
-        const row = lbl || r.closest("[class*='option'], [class*='choice'], [class*='radio'], li, tr") || r.parentElement;
+        const parentHasMultiple = r.parentElement && allRadios.filter(other => nodeContains(r.parentElement, other)).length >= 2;
+        const row = lbl || r.closest("[class*='option'], [class*='choice'], [class*='radio'], li, tr") || (!parentHasMultiple ? r.parentElement : r);
         if (isRadioOrOptionVisible(r, row)) {
           validRows.push(row || r);
         }
       }
-      if (validRows.length >= 2 && validRows.length <= 10) {
+      if (validRows.length >= 2 && validRows.length <= 16) {
         optionElements = validRows;
         matchedSelectors.options = "input[type='radio']";
       }
@@ -2132,12 +2599,13 @@
       const validRows = [];
       for (const cb of allCheckboxes) {
         const lbl = cb.closest("label") || (cb.id ? doc.querySelector(`label[for="${cb.id}"]`) : null);
-        const row = lbl || cb.closest("[class*='option'], [class*='choice'], [class*='checkbox'], li, tr") || cb.parentElement;
+        const parentHasMultiple = cb.parentElement && allCheckboxes.filter(other => nodeContains(cb.parentElement, other)).length >= 2;
+        const row = lbl || cb.closest("[class*='option'], [class*='choice'], [class*='checkbox'], li, tr") || (!parentHasMultiple ? cb.parentElement : cb);
         if (isRadioOrOptionVisible(cb, row)) {
           validRows.push(row || cb);
         }
       }
-      if (validRows.length >= 2 && validRows.length <= 10) {
+      if (validRows.length >= 2 && validRows.length <= 16) {
         optionElements = validRows;
         matchedSelectors.options = "input[type='checkbox']";
         isCheckboxGroup = true;
@@ -2189,7 +2657,7 @@
 
       for (const sel of optionGroupHeuristics) {
         const matches = Array.from(doc.querySelectorAll(sel)).filter(el => isVisible(el) && !isInsideCodeEditor(el));
-        if (matches.length >= 2 && matches.length <= 10) {
+        if (matches.length >= 2 && matches.length <= 16) {
           // If elements are handles/inputs/icons (e.g. grip, drag-handle, svg, radio, checkbox), resolve to row roots
           const isHandleOrInput = matches.some(m => {
             const tag = (m.tagName || "").toLowerCase();
@@ -2199,7 +2667,7 @@
           const candidateElements = isHandleOrInput
             ? deduplicateOptionElements(matches.map(m => resolveOptionRowRoot(m, matches)))
             : matches;
-          if (candidateElements.length >= 2 && candidateElements.length <= 10) {
+          if (candidateElements.length >= 2 && candidateElements.length <= 16) {
             const texts = candidateElements.map(el => getCleanVisibleText(el));
             const validTexts = texts.filter(t => t.length >= 1 && !isHeaderOrNavText(t));
             if (validTexts.length >= 2) {
@@ -2265,12 +2733,63 @@
           .map(img => img.closest("label, [class*='option'], [class*='choice'], .card, div") || img.parentElement)
           .filter(el => el && isVisible(el));
         const uniqueImageCards = deduplicateOptionElements(imageCards);
-        if (uniqueImageCards.length >= 2 && uniqueImageCards.length <= 10) {
+        if (uniqueImageCards.length >= 2 && uniqueImageCards.length <= 16) {
           optionElements = uniqueImageCards;
           matchedSelectors.options = "image-card-options";
         }
       } catch (_) {}
     }
+
+    // Split-Pane Stem + Option Discovery (e.g. learning.ccbp.in primitive-coding-practice & default-question-practice)
+    // Discover left pane (under PRACTICE INSTRUCTIONS) and pair with right-pane options.
+    // Must NOT match the standalone 'i PRACTICE INSTRUCTIONS' button inside the top navigation bar!
+    let leftPane = null;
+    try {
+      const candidateHeaders = Array.from(doc.querySelectorAll("h1, h2, h3, h4, div, span, p, header, section"));
+      for (const h of candidateHeaders) {
+        if (!isVisible(h)) continue;
+        const t = cleanText(h.textContent || "");
+        if (/^(?:[iⓘ]\s*)?practice\s*instructions$/i.test(t)) {
+          const candidatePane = h.closest("[class*='pane'], [class*='column'], [class*='split'], [class*='left'], section, div") || h.parentElement;
+          if (candidatePane) {
+            const paneText = cleanText(candidatePane.textContent || "");
+            const isTopBar = /end\s*practice|end\s*test|questions?\s*attempted|questions?\s*asked|\bID\s*:\s*[A-Z0-9]{6,}/i.test(paneText);
+            const strippedPaneText = paneText.replace(/^(?:[iⓘ]\s*)?practice\s*instructions\s*/i, "").trim();
+            const hasSubstantialBody = strippedPaneText.length >= 10 || !!(candidatePane.querySelector && candidatePane.querySelector("p, pre, code, img, svg, table"));
+            if (!isTopBar && hasSubstantialBody) {
+              leftPane = candidatePane;
+              break;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Pre-discover free text input (textarea / text box) so box-type questions bound stem extraction above the input box
+    let earlyTextInputEl = null;
+    try {
+      if (custom.textInputSelector) {
+        earlyTextInputEl = doc.querySelector(custom.textInputSelector);
+      }
+      if (!earlyTextInputEl && doc.querySelector) {
+        const earlyInputSelectors = [
+          "[data-quiz-input]",
+          "textarea.quiz-input",
+          "textarea[placeholder*='answer' i]",
+          "textarea[placeholder*='enter' i]",
+          "input[placeholder*='answer' i]",
+          "input[placeholder*='enter' i]",
+          "textarea:not([aria-hidden='true'])"
+        ];
+        for (const sel of earlyInputSelectors) {
+          const el = doc.querySelector(sel);
+          if (el && isVisible(el) && !isQuizZyInternalElement(el)) {
+            earlyTextInputEl = el;
+            break;
+          }
+        }
+      }
+    } catch (_) {}
 
     // 3. EXTRACT QUESTION TEXT (Supports multi-block, code snippets, declarative prompts, ignores explanations)
     let question = "";
@@ -2285,16 +2804,25 @@
       }
     }
 
-    // Outermost content blocks discovery inside quiz card strictly preceding optionElements[0]
+    // Outermost content blocks discovery inside quiz card strictly preceding optionElements[0] (or textInputEl)
     // Fixes multi-block Assertion (A) & Reason (R) and multi-statement questions on learning.ccbp.in
     if (!question) {
       let cardContainers = (quizCard ? [quizCard] : Array.from(doc.querySelectorAll(
         "[class*='question-card'], [class*='questionCard'], [class*='questionContainer'], [class*='question-container'], [class*='quiz-card'], [class*='quizCard'], [class*='quiz-container'], [class*='quizContainer'], [class*='practice-card'], [class*='problem-card'], [class*='mcq-card'], [class*='card'], .card, main, [role='main'], form"
       ))).filter(isVisible);
 
-      // If no card container found yet but options exist, walk up from first option to find common card
-      const firstOpt = (optionElements && optionElements.length > 0) ? optionElements[0] : null;
-      if (cardContainers.length === 0 && firstOpt) {
+      // If no card container found yet but options (or textInputEl) exist, walk up from anchor to find common card
+      const firstOpt = (optionElements && optionElements.length > 0) ? optionElements[0] : earlyTextInputEl;
+      if (leftPane && firstOpt) {
+        let curr = firstOpt.parentElement;
+        while (curr && curr !== doc.body && curr !== doc.documentElement) {
+          if (curr.contains(leftPane)) {
+            cardContainers = [curr];
+            break;
+          }
+          curr = curr.parentElement;
+        }
+      } else if (cardContainers.length === 0 && firstOpt) {
         let curr = firstOpt.parentElement;
         while (curr && curr !== doc.body && curr !== doc.documentElement) {
           if (isQuizZyInternalElement(curr)) break;
@@ -2314,18 +2842,19 @@
         const allDescendants = Array.from(card.querySelectorAll("*"));
         const firstOptIndex = firstOpt ? allDescendants.indexOf(firstOpt) : -1;
 
-        // Visual position boundary if getBoundingClientRect is available
+        // Visual position boundary if getBoundingClientRect is available (measured ONCE outside loop)
         let firstOptTop = Infinity;
+        let fRect = null;
         if (firstOpt && typeof firstOpt.getBoundingClientRect === "function") {
-          const r = firstOpt.getBoundingClientRect();
-          if (r && (r.top !== 0 || r.bottom !== 0)) {
-            firstOptTop = r.top;
+          fRect = firstOpt.getBoundingClientRect();
+          if (fRect && (fRect.top !== 0 || fRect.bottom !== 0)) {
+            firstOptTop = fRect.top;
           }
         }
 
         // Elements inside card strictly preceding firstOpt in pre-order traversal
         const precedingElements = (firstOptIndex !== -1)
-          ? allDescendants.slice(0, firstOptIndex).filter(el => !el.contains(firstOpt))
+          ? allDescendants.slice(0, firstOptIndex).filter(el => !nodeContains(el, firstOpt))
           : allDescendants;
 
         // Filter to all visible content blocks (p, div, span, pre, code, table, li, h1-h4)
@@ -2335,31 +2864,47 @@
           if (containsActionButtonOrFooter(el)) continue;
           if (isExplanationOrFeedback(el)) continue;
 
-          // Check visual layout position: must appear above the first option element
-          if (firstOptTop !== Infinity && typeof el.getBoundingClientRect === "function") {
-            const elRect = el.getBoundingClientRect();
+          const tag = (el.tagName || "").toLowerCase();
+          const isCode = tag === "pre" || tag === "code" || !!(el.querySelector && el.querySelector("pre, code, .ace_editor, .monaco-editor, [class*='code']"));
+          const isScrollOrCode = isCode || isInsideSwipeableOrScrollableContainer(el) || Boolean(custom && custom.relaxScrollBounds);
+
+          let isLeftOfOptions = false;
+          let elRect = null;
+          const hasRectFn = (typeof el.getBoundingClientRect === "function");
+
+          if (fRect && hasRectFn) {
+            elRect = el.getBoundingClientRect();
+            if (elRect && (elRect.right <= fRect.left + 20)) {
+              isLeftOfOptions = true;
+            }
+          }
+          if (leftPane && (leftPane === el || nodeContains(leftPane, el))) {
+            isLeftOfOptions = true;
+          }
+
+          // Check visual layout position: only restrict vertical position if in the same column as options and not a scrollable/swipeable code block
+          if (!isLeftOfOptions && !isScrollOrCode && firstOptTop !== Infinity && hasRectFn) {
+            if (!elRect) elRect = el.getBoundingClientRect();
             if (elRect && (elRect.top !== 0 || elRect.bottom !== 0) && elRect.bottom > firstOptTop + 8) {
               continue;
             }
           }
 
           // If an ancestor is already selected in selectedBlocks, skip descendant to avoid duplicate text
-          const hasSelectedAncestor = selectedBlocks.some(parent => parent.contains(el));
+          const hasSelectedAncestor = selectedBlocks.some(parent => nodeContains(parent, el));
           if (hasSelectedAncestor) continue;
 
-          const tag = (el.tagName || "").toLowerCase();
           if (tag === "button" || tag === "input" || tag === "hr" || tag === "br" || tag === "style" || tag === "script") continue;
           if (el.querySelector && el.querySelector("input[type='radio'], [role='radio'], [class*='option'], button")) continue;
 
-          // If this element contains child blocks (p, div, span, etc.) that themselves have text,
-          // prefer selecting the more granular child blocks rather than the whole container
+          // If this element contains child blocks that themselves have text, prefer granular children
           if (tag !== "pre" && tag !== "code" && el.querySelector && el.querySelector("p, h1, h2, h3, h4, pre, code, table, li")) {
             continue;
           }
 
-          const isCode = tag === "pre" || tag === "code";
           const txt = getCleanVisibleText(el, isCode);
-          if (txt.length >= 3 && !isHeaderOrNavText(txt)) {
+          const minLen = isCode ? 2 : 3;
+          if (txt.length >= minLen && !isHeaderOrNavText(txt)) {
             // Exclude header boilerplate
             if (!/^(?:mcq\s*practice|practice\s*instructions|end\s*practice|score\s*:|questions?\s*attempted|drag\s+and\s+drop\s+to\s+order|drag\s+to\s+reorder)/i.test(txt)) {
               selectedBlocks.push(el);
@@ -2370,17 +2915,9 @@
         const stemParts = [];
         for (const block of selectedBlocks) {
           const tag = (block.tagName || "").toLowerCase();
-          const isCode = tag === "pre" || tag === "code";
-          if (isCode) {
-            const rawCode = (block.textContent || block.innerText || "");
-            const cleanCode = rawCode
-              .replace(/[\u200B-\u200D\uFEFF]/g, "")
-              .replace(/\r\n/g, "\n")
-              .replace(/\r/g, "\n");
-            const lines = cleanCode.split("\n");
-            while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-            while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
-            const formattedCode = lines.join("\n");
+          const hasCodeBlock = tag === "pre" || tag === "code" || !!(block.querySelector && block.querySelector("pre, code, .ace_editor, .monaco-editor, [class*='code']"));
+          if (hasCodeBlock) {
+            const formattedCode = extractCleanCodeFromClonedNode(block, false);
             if (formattedCode && !stemParts.includes(formattedCode)) {
               stemParts.push(formattedCode);
             }
@@ -2514,7 +3051,15 @@
       }
 
       options = optionElements.map((el) => {
-        const hasCode = !!(el.querySelector && el.querySelector("pre, code")) || (el.tagName && ["pre", "code"].includes(el.tagName.toLowerCase()));
+        const isCodeCard = !isDraggableOrder && (
+          !!(el.querySelector && el.querySelector("pre, .ace_editor, .monaco-editor, [class*='syntax-highlighter'], [class*='code-block'], [class*='code-container']")) ||
+          (el.tagName && ["pre"].includes(el.tagName.toLowerCase()))
+        );
+        if (isCodeCard) {
+          const cleanCode = extractCleanCodeFromClonedNode(el, true);
+          if (cleanCode && cleanCode.length > 0) return cleanCode;
+        }
+        const hasCode = isCodeCard || !!(el.querySelector && el.querySelector("code, [class*='code']")) || (el.tagName && ["code"].includes(el.tagName.toLowerCase()));
         const raw = getCleanVisibleText(el, hasCode);
         const normalized = normalizeOptionWhitespace(raw, hasCode);
         return normalized || raw;
@@ -2572,7 +3117,8 @@
     }
 
     // 4. RESOLVE QUESTION TYPE
-    if (forcedQType !== "auto") {
+    // Strict MCQ/Multi/Order vs Code Rule: If >= 2 selectable options exist, NEVER classify as 'code'
+    if (forcedQType !== "auto" && !(forcedQType === "code" && options.length >= 2)) {
       qType = forcedQType;
     } else {
       if (options.length === 0 && textInputEl) {
@@ -2592,8 +3138,27 @@
           (optionElements && optionElements.some((el) => el.querySelector && el.querySelector("input[type='radio'], [role='radio']")));
 
         // Check for checkbox / multi-select indicators (square checkboxes)
+        const hasSquareCheckboxIndicators = Boolean(optionElements && optionElements.some(el => {
+          if (!el || !el.children || el.children.length === 0) return false;
+          const first = el.firstElementChild;
+          if (!first || typeof window === "undefined" || !window.getComputedStyle) return false;
+          try {
+            const cs = window.getComputedStyle(first);
+            if (!cs) return false;
+            const w = parseFloat(cs.width) || 0;
+            const h = parseFloat(cs.height) || 0;
+            const br = String(cs.borderRadius || "").toLowerCase();
+            if (w >= 12 && w <= 36 && h >= 12 && h <= 36) {
+              const isCircle = br.includes("50%") || br.includes("9999px") || parseFloat(br) >= 12;
+              return !isCircle;
+            }
+          } catch (_) {}
+          return false;
+        }));
+
         const hasCheckboxInputs = isCheckboxGroup || matchedSelectors.options === "input[type='checkbox']" ||
-          (optionElements && optionElements.some((el) => el.querySelector && el.querySelector("input[type='checkbox'], [role='checkbox'], [class*='checkbox' i]")));
+          (optionElements && optionElements.some((el) => el.querySelector && el.querySelector("input[type='checkbox'], [role='checkbox'], [class*='checkbox' i]"))) ||
+          hasSquareCheckboxIndicators;
         const multiDirectiveRegex = /\b(which of the following are|select all|choose all|multiple answers|more than one|all that apply)\b/i;
 
         const orderDirectiveRegex = /\b(arrange|chronological|sort|first to last|earliest to latest|rank|rearrange|put\s+(?:the\s+following\s+)?in\s+order|correct\s+(?:order|sequence)|drag\s+and\s+drop\s+to\s+order|drag\s+to\s+reorder)\b/i;
@@ -2626,16 +3191,34 @@
       }
     }
 
-    // Clean any trailing or leading Drag and Drop to Order banner text from question stem
+    // Clean any trailing or leading Drag and Drop to Order banner text and residual navbar metadata from question stem
     if (question) {
       question = question
+        .replace(/\[Image:\s*(?:Chalapathy[^\]]*|Profile\s*Picture[^\]]*|[^\]]*logo[^\]]*|[^\]]*avatar[^\]]*)\]\s*/gi, "")
+        .replace(/^\s*[^\n]*?\bID\s*:\s*[A-Z0-9]{6,}\s*/i, "")
+        .replace(/(?:^|\n)\s*(?:Classroom\s*Quiz|Questions?\s*(?:Asked|Attempted)\s*:\s*\d+\s*\/\s*\d+|Score\s*:\s*\d+)\s*(?=\n|$)/gi, "\n")
         .replace(/\n\s*drag\s+and\s+drop\s+to\s+order\s*$/i, "")
         .replace(/^\s*drag\s+and\s+drop\s+to\s+order\s*\n/i, "")
         .trim();
     }
 
+    // Complete Code Snippet extraction (scrollable/swipeable boxes, Ace, Monaco, CodeMirror, Prism, pre)
+    // Run BEFORE empty-question validation so code-heavy stems (with little/no plain prose) always populate `question`!
+    const fullSnippet = extractFullCodeSnippets(quizCard || doc, doc, optionElements) || extractSplitPaneCodeContext(quizCard, doc);
+    let codeContext = "";
+    if (fullSnippet && fullSnippet.trim().length > 0) {
+      const trimmedCode = fullSnippet.trim();
+      codeContext = trimmedCode;
+      if (!question || question.trim().length < 2) {
+        question = trimmedCode;
+        matchedSelectors.question = "swipeable-code-stem";
+      } else if (!question.includes(trimmedCode)) {
+        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\`\n\n[CODE SNIPPET]:\n${trimmedCode}`;
+      }
+    }
+
     // Validation
-    if (!question) {
+    if (!question || question.trim().length < 2) {
       return {
         success: false,
         error: "Unable to detect quiz question. Please specify a Question Selector in Settings or enter it manually."
@@ -2654,21 +3237,15 @@
       }
     }
 
-    // Complete Code Snippet extraction (scrollable/swipeable boxes, Ace, Monaco, CodeMirror, Prism, pre)
-    const fullSnippet = extractFullCodeSnippets(quizCard || doc, doc) || extractSplitPaneCodeContext(quizCard, doc);
-    let codeContext = "";
-    if (fullSnippet && fullSnippet.trim().length > 0) {
-      const trimmedCode = fullSnippet.trim();
-      codeContext = trimmedCode;
-      if (!question.includes(trimmedCode)) {
-        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\`\n\n[CODE SNIPPET]:\n${trimmedCode}`;
-      }
-    }
-
     // Extract visual diagram / tree context if present
-    const visualContext = extractVisualContext(quizCard || doc, doc);
+    let visualContext = extractVisualContext(leftPane || quizCard || doc, doc);
+    if (!visualContext.image_data && !visualContext.image_url && !visualContext.svg_data && leftPane && quizCard && leftPane !== quizCard) {
+      visualContext = extractVisualContext(quizCard, doc);
+    }
     let imageData = visualContext.image_data || null;
     let imageUrl = visualContext.image_url || null;
+    let svgData = visualContext.svg_data || null;
+    const imageBbox = visualContext.image_bbox || visualContext.bounding_box || null;
     if (visualContext.diagram_structure && !question.includes("[EXTRACTED DIAGRAM STRUCTURE]")) {
       question = `${question}\n\n${visualContext.diagram_structure}`;
     }
@@ -2695,6 +3272,8 @@
       options: options,
       image_data: imageData,
       image_url: imageUrl,
+      svg_data: svgData,
+      image_bbox: imageBbox,
       optionSelectors: optionSelectors,
       dragHandleSelectors: dragHandleSelectors,
       meta: {
@@ -2707,13 +3286,15 @@
         code_context: codeContext || undefined,
         image_data: imageData,
         image_url: imageUrl,
-        has_visual_diagram: !!imageData || !!imageUrl || !!visualContext.diagram_structure,
+        svg_data: svgData,
+        image_bbox: imageBbox,
+        has_visual_diagram: !!imageData || !!imageUrl || !!svgData || !!visualContext.diagram_structure,
         visual_bounding_box: visualContext.bounding_box || undefined
       }
     };
 
     if (typeof window !== "undefined" && Array.isArray(optionElements) && optionElements.length >= 2) {
-      window.__QUIZZY_LAST_OPTION_ELEMENTS__ = optionElements;
+      window.__QUIZZY_LAST_OPTION_ELEMENTS__ = optionElements.map(el => (typeof WeakRef !== "undefined" ? new WeakRef(el) : el));
       window.__QUIZZY_LAST_OPTIONS_TEXT__ = options;
     }
 
@@ -2838,7 +3419,7 @@
     const type = (q.q_type || "mcq").toLowerCase();
     if (["mcq", "multi", "order"].includes(type)) {
       const validOpts = Array.isArray(q.options)
-        ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+        ? q.options.filter(o => o !== null && o !== undefined && (typeof o === "string" ? o.trim().length >= 1 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length >= 1 : String(o).trim().length >= 1)))
         : [];
       if (validOpts.length < 2) return false;
     }
@@ -2875,9 +3456,71 @@
     hasQuizOptionsOutsideEditor,
     extractSplitPaneCodeContext,
     extractFullCodeSnippets,
+    extractCleanCodeFromClonedNode,
     decodePotentialUrl,
-    findDragHandleInRow
+    findDragHandleInRow,
+    recycleMemory: recycleExtractorMemory,
+    resetQuestionLifecycleState: recycleExtractorMemory
   };
+
+  function recycleExtractorMemory() {
+    _extractorVisibilityCache = (typeof WeakMap !== "undefined") ? new WeakMap() : null;
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_LAST_OPTION_ELEMENTS__ = [];
+      window.__QUIZZY_LAST_OPTIONS_TEXT__ = [];
+      window.__QUIZZY_LAST_EXTRACTION__ = null;
+      window.__QUIZZY_CACHED_CONTAINERS__ = null;
+    }
+    if (typeof document !== "undefined") {
+      try {
+        const styleEl = document.getElementById("quizzy-optin-highlight-styles");
+        if (styleEl && typeof styleEl.remove === "function") styleEl.remove();
+        const winners = document.querySelectorAll(".quizzy-optin-winner");
+        winners.forEach((el) => {
+          if (el && el.classList) el.classList.remove("quizzy-optin-winner");
+        });
+        const badges = document.querySelectorAll(".quizzy-order-target-badge");
+        badges.forEach((b) => {
+          if (b && typeof b.remove === "function") b.remove();
+        });
+        const highlighted = document.querySelectorAll("[data-quizzy-highlight]");
+        highlighted.forEach((el) => {
+          if (el && typeof el.removeAttribute === "function") {
+            el.removeAttribute("data-quizzy-highlight");
+          }
+          if (el && el.style) {
+            el.style.outline = "";
+            el.style.outlineOffset = "";
+          }
+        });
+      } catch (_) {}
+    }
+  }
+
+  function registerRecycleHandler(handler) {
+    if (typeof window === "undefined") return;
+    if (!Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__ = [];
+    }
+    if (typeof handler === "function" && !window.__QUIZZY_RECYCLE_HANDLERS__.includes(handler)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__.push(handler);
+    }
+    if (typeof window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ !== "function") {
+      window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ = function () {
+        if (Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+          for (const fn of window.__QUIZZY_RECYCLE_HANDLERS__) {
+            try {
+              if (typeof fn === "function") fn();
+            } catch (err) {
+              console.warn("[QuizZy Recycle] Handler failed:", err);
+            }
+          }
+        }
+      };
+    }
+  }
+
+  registerRecycleHandler(recycleExtractorMemory);
 
   if (typeof window !== "undefined") {
     window.QuizZyExtractor = QuizZyExtractor;

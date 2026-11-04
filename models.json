@@ -124,18 +124,6 @@
         "model": "meta-llama/llama-4-scout-17b-16e-instruct",
         "tier": "S",
         "priority": 1
-      },
-      {
-        "provider": "groq",
-        "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
-        "tier": "S",
-        "priority": 2
-      },
-      {
-        "provider": "groq",
-        "model": "llama-3.2-11b-vision-preview",
-        "tier": "A",
-        "priority": 3
       }
     ],
     "tier_2_gemini": [
@@ -161,9 +149,15 @@
       },
       {
         "provider": "openrouter",
-        "model": "google/gemma-4-31b-it:free",
+        "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "tier": "S",
         "priority": 2
+      },
+      {
+        "provider": "openrouter",
+        "model": "google/gemma-4-31b-it:free",
+        "tier": "S",
+        "priority": 3
       }
     ],
     "tier_4_text_fallback": {
@@ -178,7 +172,7 @@
     "searxng_grounded_llm_timeout_ms": 900,
     "s_tier_soft_escalation_ms": 1300,
     "hard_total_budget_ms": 8000,
-    "max_tokens": 512
+    "max_tokens": 1024
   },
   "code_timeouts_ms": {
     "groq_parallel_timeout_ms": 6500,

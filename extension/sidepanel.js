@@ -344,8 +344,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // ==========================================================================
-  // Telemetry Strip Updates
+  // Telemetry Strip Updates (Bounded Ring Buffer <= 50 entries)
   // ==========================================================================
+  const MAX_LOG_HISTORY = 50;
+  const inMemoryTelemetryHistory = [];
+
   function setTelemetryState(stateKey, logText = "") {
     if (!telemetryStateBadge) return;
 
@@ -367,6 +370,19 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (logText && telemetryLog) {
       telemetryLog.textContent = logText;
+      inMemoryTelemetryHistory.push({
+        state: stateKey,
+        text: logText,
+        timestamp: Date.now()
+      });
+      while (inMemoryTelemetryHistory.length > MAX_LOG_HISTORY) {
+        inMemoryTelemetryHistory.shift();
+      }
+      if (telemetryLog.childNodes && telemetryLog.childNodes.length > MAX_LOG_HISTORY) {
+        while (telemetryLog.childNodes.length > MAX_LOG_HISTORY) {
+          telemetryLog.removeChild(telemetryLog.firstChild);
+        }
+      }
     }
   }
 
@@ -374,6 +390,23 @@ document.addEventListener("DOMContentLoaded", () => {
     if (telemetryStepCounter) {
       telemetryStepCounter.textContent = `Step ${current} / ${max}`;
     }
+  }
+
+  function trimTelemetryLogs(maxEntries = 15) {
+    const limit = Math.max(1, maxEntries);
+    while (inMemoryTelemetryHistory.length > limit) {
+      inMemoryTelemetryHistory.shift();
+    }
+    if (telemetryLog && telemetryLog.childNodes) {
+      while (telemetryLog.childNodes.length > limit) {
+        telemetryLog.removeChild(telemetryLog.firstChild);
+      }
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_TRIM_SIDEPANEL_LOGS__ = trimTelemetryLogs;
+    window.__QUIZZY_SIDEPANEL_HISTORY__ = inMemoryTelemetryHistory;
   }
 
   // ==========================================================================
@@ -1110,10 +1143,13 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Listen for background notifications (tab switched, navigated away)
+  // Listen for background notifications (tab switched, navigated away, log trim)
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.action === "KILL_SWITCH_TRIGGERED") {
       triggerKillSwitch(msg.reason || "Background navigation/tab switch event");
+    }
+    if (msg && (msg.type === "QUIZZY_TRIM_SIDEPANEL_LOGS" || msg.action === "QUIZZY_TRIM_SIDEPANEL_LOGS")) {
+      trimTelemetryLogs(msg.maxEntries || 15);
     }
   });
 

@@ -137,7 +137,12 @@ class MockNode {
     }
     if (p.includes(" > ")) {
       const segs = p.split(" > ");
-      return this.matchesSingle(segs[segs.length - 1]);
+      const parentSel = segs.slice(0, -1).join(" > ");
+      const childSel = segs[segs.length - 1];
+      if (this.parentElement && this.parentElement.matches(parentSel)) {
+        return this.matchesSingle(childSel);
+      }
+      return false;
     }
     if (p.includes(" ")) {
       const segs = p.split(/\s+/);
@@ -454,7 +459,12 @@ class MockNode {
     }
     if (p.includes(" > ")) {
       const segs = p.split(" > ");
-      return this.matchesSingle(segs[segs.length - 1]);
+      const parentSel = segs.slice(0, -1).join(" > ");
+      const childSel = segs[segs.length - 1];
+      if (this.parentElement && this.parentElement.matches(parentSel)) {
+        return this.matchesSingle(childSel);
+      }
+      return false;
     }
     if (p.includes(" ")) {
       const segs = p.split(/\s+/);
@@ -838,7 +848,12 @@ class MockNode {
     if (p === "*") return true;
     if (p.includes(" > ")) {
       const segs = p.split(" > ");
-      return this.matchesSingle(segs[segs.length - 1]);
+      const parentSel = segs.slice(0, -1).join(" > ");
+      const childSel = segs[segs.length - 1];
+      if (this.parentElement && this.parentElement.matches(parentSel)) {
+        return this.matchesSingle(childSel);
+      }
+      return false;
     }
     if (p.includes(" ")) {
       const segs = p.split(/\s+/);
@@ -1160,7 +1175,12 @@ class MockNode {
     }
     if (p.includes(" > ")) {
       const segs = p.split(" > ");
-      return this.matchesSingle(segs[segs.length - 1]);
+      const parentSel = segs.slice(0, -1).join(" > ");
+      const childSel = segs[segs.length - 1];
+      if (this.parentElement && this.parentElement.matches(parentSel)) {
+        return this.matchesSingle(childSel);
+      }
+      return false;
     }
     if (p.includes(" ")) {
       const segs = p.split(/\s+/);
@@ -1534,7 +1554,12 @@ class MockNode {
     if (p.includes(":nth-of-type(")) p = p.replace(/:nth-of-type\(\d+\)/g, "");
     if (p.includes(" > ")) {
       const segs = p.split(" > ");
-      return this.matchesSingle(segs[segs.length - 1]);
+      const parentSel = segs.slice(0, -1).join(" > ");
+      const childSel = segs[segs.length - 1];
+      if (this.parentElement && this.parentElement.matches(parentSel)) {
+        return this.matchesSingle(childSel);
+      }
+      return false;
     }
     if (p.includes(" ")) {
       const segs = p.split(/\s+/);
@@ -1821,6 +1846,196 @@ runTest().catch(err => {
         self.assertFalse(broken.get("ok"), "Broken reorder should have returned ok: false")
         self.assertFalse(broken.get("selected"), "Broken reorder should have returned selected: false")
         self.assertEqual(broken.get("error"), "ORDER_REORDER_FAILED", f"Expected ORDER_REORDER_FAILED, got {broken.get('error')}")
+
+    def test_test8_multi_choice_checkbox_styled_components_no_deselection(self):
+        """
+        Test 8: Node.js runtime simulation of learning.ccbp.in multi-select checkboxes.
+        - Verifies styled-components square checkbox detection (sc-...) without explicit semantic classes.
+        - Verifies that target options [0, 1] are checked without being clicked a second time (zero deselection).
+        - Verifies executeQuizAction returns ok: true, selected: true, verified: true.
+        """
+        js_code = r"""
+const fs = require('fs');
+const vm = require('vm');
+const path = require('path');
+
+const execPath = path.resolve(__dirname, 'extension/executor.js');
+const execCode = fs.readFileSync(execPath, 'utf8');
+
+const clicksPerIndex = { 0: 0, 1: 0, 2: 0, 3: 0 };
+let currentTime = 1000;
+
+function createCcbpCheckboxRow(text, idx, isChecked = false) {
+  const checkSvg = isChecked ? {
+    tagName: 'SVG',
+    className: 'sc-htpNat checkmark',
+    style: { display: 'block', visibility: 'visible' },
+    querySelector: () => null,
+    querySelectorAll: () => []
+  } : null;
+
+  const boxIndicator = {
+    tagName: 'DIV',
+    className: 'sc-bwzfXH checkbox-box',
+    style: {
+      width: '18px',
+      height: '18px',
+      borderRadius: '3px',
+      display: 'flex',
+      visibility: 'visible',
+      opacity: '1',
+      backgroundColor: isChecked ? 'rgb(37, 99, 235)' : 'rgb(255, 255, 255)',
+      borderColor: isChecked ? 'rgb(37, 99, 235)' : 'rgb(203, 213, 225)'
+    },
+    children: checkSvg ? [checkSvg] : [],
+    getAttribute: (k) => null,
+    hasAttribute: (k) => false,
+    querySelector: (sel) => sel.includes('svg') ? checkSvg : null,
+    querySelectorAll: (sel) => sel.includes('svg') && checkSvg ? [checkSvg] : []
+  };
+
+  const textSpan = {
+    tagName: 'SPAN',
+    className: 'sc-bxivhb text-label',
+    innerText: text,
+    textContent: text,
+    style: { display: 'inline-block' },
+    querySelector: () => null,
+    querySelectorAll: () => []
+  };
+
+  const row = {
+    tagName: 'DIV',
+    className: 'sc-bdVaJa option-row',
+    innerText: text,
+    textContent: text,
+    _checked: isChecked,
+    style: {
+      display: 'flex',
+      visibility: 'visible',
+      opacity: '1',
+      backgroundColor: 'rgb(255, 255, 255)'
+    },
+    attrs: {},
+    children: [boxIndicator, textSpan],
+    firstElementChild: boxIndicator,
+    getAttribute(k) { return this.attrs[k] !== undefined ? this.attrs[k] : null; },
+    hasAttribute(k) { return this.attrs[k] !== undefined; },
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    removeAttribute(k) { delete this.attrs[k]; },
+    getBoundingClientRect() { return { top: 100 + idx * 50, bottom: 140 + idx * 50, left: 50, right: 450, width: 400, height: 40 }; },
+    matches(sel) { return sel.includes('option') || sel.includes('div'); },
+    querySelector(sel) {
+      if (sel.includes('svg') && checkSvg) return checkSvg;
+      if (sel.includes('box') || sel.includes('check') || sel.includes('indicator') || sel.includes('div')) return boxIndicator;
+      return null;
+    },
+    querySelectorAll(sel) {
+      const res = [boxIndicator];
+      if (checkSvg) res.push(checkSvg);
+      return res;
+    },
+    click() {
+      clicksPerIndex[idx]++;
+      const next = !this._checked;
+      liveRows[idx] = createCcbpCheckboxRow(text, idx, next);
+    },
+    dispatchEvent(ev) {
+      if (ev && ev.type === 'click') {
+        this.click();
+      }
+      return true;
+    }
+  };
+  return row;
+}
+
+const optionTexts = [
+  'Set front to capacity-1',
+  'Set back to capacity-1',
+  'Set front to 0',
+  'Set back to 0'
+];
+const liveRows = optionTexts.map((t, i) => createCcbpCheckboxRow(t, i, false));
+
+const mockDoc = {
+  body: {
+    tagName: 'BODY',
+    style: { display: 'block', visibility: 'visible', opacity: '1' },
+    querySelectorAll: () => liveRows.slice(),
+    querySelector: () => liveRows[0]
+  },
+  documentElement: { clientWidth: 1200, clientHeight: 900 },
+  querySelectorAll: (sel) => {
+    if (sel.includes('option') || sel.includes('div') || sel.includes('checkbox')) return liveRows.slice();
+    return [];
+  },
+  querySelector: (sel) => liveRows[0] || null
+};
+
+const sandbox = {
+  window: {
+    innerWidth: 1200,
+    innerHeight: 900,
+    __QUIZZY_LAST_OPTION_ELEMENTS__: liveRows.map(el => ({ deref: () => el })),
+    location: { hostname: 'learning.ccbp.in', pathname: '/primitive-coding/practice' },
+    getComputedStyle: (el) => (el && el.style) ? el.style : { display: 'block', visibility: 'visible', opacity: '1' },
+    PointerEvent: class PointerEvent { constructor(t, o) { this.type = t; Object.assign(this, o); } },
+    MouseEvent: class MouseEvent { constructor(t, o) { this.type = t; Object.assign(this, o); } },
+    Event: class Event { constructor(t, o) { this.type = t; Object.assign(this, o); } }
+  },
+  document: mockDoc,
+  PointerEvent: class PointerEvent { constructor(t, o) { this.type = t; Object.assign(this, o); } },
+  MouseEvent: class MouseEvent { constructor(t, o) { this.type = t; Object.assign(this, o); } },
+  Event: class Event { constructor(t, o) { this.type = t; Object.assign(this, o); } },
+  console: console,
+  setTimeout: (fn, ms) => {
+    currentTime += (ms || 0);
+    Promise.resolve().then(fn);
+    return 1;
+  },
+  clearTimeout: () => {}
+};
+sandbox.window.document = mockDoc;
+
+vm.createContext(sandbox);
+vm.runInContext(execCode, sandbox);
+
+(async () => {
+  const res = await sandbox.window.QuizZyExecutor.executeQuizAction({
+    q_type: 'multi',
+    action: 'select_only',
+    selected_indices: [0, 1],
+    options: optionTexts
+  });
+
+  const finalChecked = liveRows.map(r => r._checked);
+  console.log(JSON.stringify({
+    ok: res.ok,
+    selected: res.selected,
+    verified: res.verified,
+    finalChecked,
+    clicksPerIndex
+  }));
+})();
+"""
+        res = subprocess.run(
+            ["node", "-e", js_code],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        out = json.loads(res.stdout.strip().splitlines()[-1])
+
+        self.assertTrue(out["ok"], f"Multi-choice selection must return ok: true: {out}")
+        self.assertTrue(out["selected"], f"Multi-choice selection must return selected: true: {out}")
+        self.assertTrue(out["verified"], f"Multi-choice selection must return verified: true: {out}")
+        self.assertEqual(out["finalChecked"], [True, True, False, False], f"Target options [0, 1] must remain checked: {out}")
+        self.assertEqual(out["clicksPerIndex"]["0"], 1, f"Option 0 must be clicked exactly once (no deselection): {out}")
+        self.assertEqual(out["clicksPerIndex"]["1"], 1, f"Option 1 must be clicked exactly once (no deselection): {out}")
+        self.assertEqual(out["clicksPerIndex"]["2"], 0, f"Option 2 must not be clicked: {out}")
+        self.assertEqual(out["clicksPerIndex"]["3"], 0, f"Option 3 must not be clicked: {out}")
 
 
 if __name__ == "__main__":

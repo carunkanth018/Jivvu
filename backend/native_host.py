@@ -200,29 +200,19 @@ def register_host(extra_origins: Optional[List[str]] = None) -> bool:
 
     backend_dir = REPO_ROOT / "backend"
     backend_dir.mkdir(parents=True, exist_ok=True)
-    cmd_path = backend_dir / "native_host.cmd"
     json_path = backend_dir / f"{HOST_NAME}.json"
 
-    # 1. Write native_host.cmd
-    python_exe = REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe"
-    if not python_exe.is_file():
-        python_exe = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
-    if not python_exe.is_file():
-        python_exe = Path(sys.executable)
-
-    cmd_content = (
-        '@echo off\r\n'
-        'setlocal\r\n'
-        'cd /d "%~dp0"\r\n'
-        'if exist "%~dp0..\\.venv\\Scripts\\pythonw.exe" (\r\n'
-        '    "%~dp0..\\.venv\\Scripts\\pythonw.exe" -u "%~dp0native_host.py" %*\r\n'
-        ') else if exist "%~dp0..\\.venv\\Scripts\\python.exe" (\r\n'
-        '    "%~dp0..\\.venv\\Scripts\\python.exe" -u "%~dp0native_host.py" %*\r\n'
-        ') else (\r\n'
-        f'    "{python_exe}" -u "%~dp0native_host.py" %*\r\n'
-        ')\r\n'
-    )
-    cmd_path.write_text(cmd_content, encoding="utf-8")
+    # 1. Resolve host executable path (prefer compiled windowless native_host_win.exe)
+    exe_path = backend_dir / "native_host_win.exe"
+    if exe_path.is_file():
+        target_path = str(exe_path)
+    else:
+        python_exe = REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe"
+        if not python_exe.is_file():
+            python_exe = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+        if not python_exe.is_file():
+            python_exe = Path(sys.executable)
+        target_path = str(python_exe)
 
     # 2. Build allowed origins
     origins = get_default_origins()
@@ -235,10 +225,6 @@ def register_host(extra_origins: Optional[List[str]] = None) -> bool:
                 clean = f"chrome-extension://{clean.strip('/')}/"
             if clean not in origins:
                 origins.append(clean)
-
-    # 3. Write backend/com.quizzy.lifecycle.json
-    exe_path = backend_dir / "native_host_win.exe"
-    target_path = str(exe_path if exe_path.is_file() else cmd_path)
     manifest_data = {
         "name": HOST_NAME,
         "description": "QuizZy Automatic Backend Lifecycle Manager Native Messaging Host",

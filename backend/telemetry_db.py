@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from backend.db_util import connect_sqlite_wal
+
 logger = logging.getLogger("quizzy.telemetry")
 
 PROD_DB_PATH = Path(__file__).resolve().parent / "telemetry.db"
@@ -58,14 +60,7 @@ def get_db_connection(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Con
     Open an SQLite connection configured with WAL mode and row factory.
     Enables concurrent multi-process reads and writes between backend and dashboard.
     """
-    path = resolve_db_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=15.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_sqlite_wal(resolve_db_path(db_path), timeout=15.0)
 
 
 def init_db(db_path: Optional[Union[str, Path]] = None) -> None:

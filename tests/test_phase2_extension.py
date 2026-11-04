@@ -45,11 +45,14 @@ def test_manifest_compliance():
     assert any("127.0.0.1:8000" in hp for hp in host_permissions), "Missing 127.0.0.1:8000 in host_permissions"
     print(f"  -> Passed host_permissions audit: {host_permissions}")
 
-    # 4. Strict absence of intrusive capabilities (only stealth_shield.js permitted in content_scripts)
+    # 4. Strict absence of intrusive capabilities (stealth_shield.js strictly gated to test/staging in MAIN world)
     assert "web_accessible_resources" not in manifest, "STRICT VIOLATION: web_accessible_resources must NOT be declared!"
     cs = manifest.get("content_scripts", [])
     if cs:
-        assert len(cs) == 1 and cs[0].get("js") == ["stealth_shield.js"] and cs[0].get("world") == "MAIN", "Only stealth_shield.js permitted in content_scripts"
+        stealth_cs = [c for c in cs if "stealth_shield.js" in c.get("js", [])]
+        assert len(stealth_cs) == 1 and stealth_cs[0].get("world") == "MAIN", "stealth_shield.js must run strictly in MAIN world for test/staging"
+        companion_cs = [c for c in cs if "portal_completion.js" in c.get("js", [])]
+        assert len(companion_cs) == 1, "portal_completion.js must be declared in content_scripts"
     print("  -> Passed strict exclusion: zero web_accessible_resources, stealth_shield.js audit verified")
 
     # 5. Side panel & background configuration

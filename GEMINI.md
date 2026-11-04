@@ -61,6 +61,9 @@
 - **Virtual Environment**: Always use the project virtual environment at `.venv\Scripts\python.exe`.
 - **No Global Installs**: Never run global `pip install`. All project dependencies are tracked in `requirements.txt`.
 
+### 4.4 Continuous Memory & Documentation Invariant (Mandatory)
+- **Always Update `Jivvu.md` and `progress.md`**: Upon completing any task, bugfix, architectural refactor, or milestone, ALWAYS update both `Jivvu.md` and `progress.md` with the latest system state, root causes, changes made, and verification test counts. Keep documentation synchronized with verified evidence.
+
 ---
 
 ## 5. Developer Launchers & Common Commands

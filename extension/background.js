@@ -16,6 +16,18 @@ const BACKEND_BASE_URL = "http://127.0.0.1:8000";
 const _bgInFlightSolves = new Map();
 const _bgRecent429Signatures = new Map();
 
+function recordRecent429Signature(qSig) {
+  const now = Date.now();
+  for (const [key, ts] of _bgRecent429Signatures.entries()) {
+    if (now - ts > 10000) _bgRecent429Signatures.delete(key);
+  }
+  if (_bgRecent429Signatures.size >= 50) {
+    const oldest = _bgRecent429Signatures.keys().next().value;
+    if (oldest) _bgRecent429Signatures.delete(oldest);
+  }
+  _bgRecent429Signatures.set(qSig, now);
+}
+
 function decodePotentialUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return "";
   let u = rawUrl.trim();
@@ -43,7 +55,7 @@ function isValidExtractedQuestion(q) {
   const type = (q.q_type || "mcq").toLowerCase();
   if (["mcq", "multi", "order"].includes(type)) {
     const validOpts = Array.isArray(q.options)
-      ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+      ? q.options.filter(o => o !== null && o !== undefined && (typeof o === "string" ? o.trim().length >= 1 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length >= 1 : String(o).trim().length >= 1)))
       : [];
     if (validOpts.length < 2) return false;
   }
@@ -73,20 +85,61 @@ async function resolveTargetTab(message, sender) {
   }
 }
 
-// Injects extractor, executor, and floating HUD into target tab
-async function injectAndToggleFloatingHud(tabId, shouldToggle = true, autoShow = true) {
-  if (!tabId) return { success: false, error: "Missing tabId" };
+// In-memory cache of known injected scripts per tab to eliminate redundant IPC round-trips
+const injectedTabScripts = new Map(); // tabId -> Set of script filenames
+
+function trackInjectedTabScript(tabId, fileName) {
+  if (!injectedTabScripts.has(tabId)) {
+    if (injectedTabScripts.size >= 50) {
+      const oldestTab = injectedTabScripts.keys().next().value;
+      if (oldestTab !== undefined) injectedTabScripts.delete(oldestTab);
+    }
+    injectedTabScripts.set(tabId, new Set());
+  }
+  injectedTabScripts.get(tabId).add(fileName);
+}
+
+// Helper to avoid re-injecting large content scripts if already present in tab
+async function ensureScriptInjected(tabId, checkGlobal, fileName) {
+  if (!tabId || !fileName) return false;
+
+  if (injectedTabScripts.has(tabId) && injectedTabScripts.get(tabId).has(fileName)) {
+    return true;
+  }
+
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: (g) => Boolean(window[g]),
+      args: [checkGlobal]
+    });
+    if (res && res[0] && res[0].result) {
+      trackInjectedTabScript(tabId, fileName);
+      return true;
+    }
+  } catch (_) {}
+
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "ISOLATED",
-      files: ["extractor.js"]
+      files: [fileName]
     });
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "ISOLATED",
-      files: ["executor.js"]
-    });
+    trackInjectedTabScript(tabId, fileName);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Injects extractor, executor, and floating HUD into target tab
+async function injectAndToggleFloatingHud(tabId, shouldToggle = true, autoShow = true) {
+  if (!tabId) return { success: false, error: "Missing tabId" };
+  try {
+    await ensureScriptInjected(tabId, "__QUIZZY_EXTRACTOR_LOADED__", "extractor.js");
+    await ensureScriptInjected(tabId, "__QUIZZY_EXECUTOR_LOADED__", "executor.js");
+    await ensureScriptInjected(tabId, "__QUIZZY_PORTAL_LOADED__", "portal_completion.js");
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "ISOLATED",
@@ -545,7 +598,7 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
         chrome.scripting.executeScript({
           target: { tabId },
           world: "ISOLATED",
-          files: ["ccbp_lifecycle_bridge.js"]
+          files: ["ccbp_lifecycle_bridge.js", "portal_completion.js"]
         }).catch(() => {});
       }
 
@@ -580,6 +633,7 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onCreated) {
 // 3. Tab Removed (Closed) Listener
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    injectedTabScripts.delete(tabId);
     syncCcbpBackendLifecycle("tabs.onRemoved");
   });
 }
@@ -587,6 +641,7 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
 // 4. Tab Replaced (Prerendered/Navigated) Listener
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onReplaced) {
   chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    injectedTabScripts.delete(removedTabId);
     syncCcbpBackendLifecycle("tabs.onReplaced");
   });
 }
@@ -606,13 +661,16 @@ if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved)
 if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
   chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details && details.tabId && details.url) {
+      // Broadcast route change message to active tab contexts so timers/controllers can abort cleanly
+      chrome.tabs.sendMessage(details.tabId, {
+        action: "QUIZZY_ROUTE_CHANGED",
+        url: details.url
+      }).catch(() => {});
+
       if (isCcbpUrl(details.url)) {
         syncCcbpBackendLifecycle("webNavigation.onHistoryStateUpdated");
-        chrome.scripting.executeScript({
-          target: { tabId: details.tabId },
-          world: "ISOLATED",
-          files: ["ccbp_lifecycle_bridge.js"]
-        }).catch(() => {});
+        ensureScriptInjected(details.tabId, "__QUIZZY_CCBP_LIFECYCLE_BRIDGE__", "ccbp_lifecycle_bridge.js").catch(() => {});
+        ensureScriptInjected(details.tabId, "__QUIZZY_PORTAL_LOADED__", "portal_completion.js").catch(() => {});
       }
       try {
         const urlObj = new URL(details.url);
@@ -636,6 +694,9 @@ if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigatio
 // 7. Web Navigation Committed Listener
 if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigation.onCommitted) {
   chrome.webNavigation.onCommitted.addListener((details) => {
+    if (details && details.frameId === 0 && details.tabId) {
+      injectedTabScripts.delete(details.tabId);
+    }
     if (details && details.url && isCcbpUrl(details.url)) {
       syncCcbpBackendLifecycle("webNavigation.onCommitted");
     }
@@ -1170,6 +1231,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const action = message.action || message.type;
 
+  if (action === "QUIZZY_PERFORM_SOFT_RECYCLE" || action === "QUIZZY_RESET_QUESTION_STATE" || message.type === "QUIZZY_PERFORM_SOFT_RECYCLE") {
+    const now = Date.now();
+    for (const [key, ts] of _bgRecent429Signatures.entries()) {
+      if (now - ts > 10000) _bgRecent429Signatures.delete(key);
+    }
+    while (_bgRecent429Signatures.size > 20) {
+      const oldest = _bgRecent429Signatures.keys().next().value;
+      if (oldest) _bgRecent429Signatures.delete(oldest);
+      else break;
+    }
+
+    _bgInFlightSolves.clear();
+
+    try {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: "QUIZZY_TRIM_SIDEPANEL_LOGS", maxEntries: 15 }).catch(() => {});
+      }
+    } catch (_) {}
+
+    sendResponse({ success: true, recycled: true });
+    return false;
+  }
+
   // Instant CCBP Page Active / Heartbeat / Unload signals from content script
   if (action === "CCBP_PAGE_ACTIVE" || action === "CCBP_PAGE_HEARTBEAT") {
     if (ccbpShutdownTimer) {
@@ -1181,7 +1265,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendLifecycleHeartbeat(1);
     ensureBackendRunningForCcbp(action === "CCBP_PAGE_HEARTBEAT" ? "content_script_heartbeat" : "message:CCBP_PAGE_ACTIVE");
-    sendResponse({ success: true, active: true });
+    sendResponse({ success: true, active: true, backend_healthy: Boolean(isBackendRunning) });
     return false;
   }
   if (action === "CCBP_PAGE_HIDE" || action === "CCBP_PAGE_UNLOAD") {
@@ -1329,7 +1413,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const dispatchAll = (resObj) => {
       _bgInFlightSolves.delete(qSig);
       if (resObj && (resObj.status === 429 || (resObj.error && String(resObj.error).includes("429")))) {
-        _bgRecent429Signatures.set(qSig, Date.now());
+        recordRecent429Signature(qSig);
       }
       for (const cb of callbacks) {
         try { cb(resObj); } catch (_) {}
@@ -1369,82 +1453,136 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
     };
 
-    // Helper: fetch cross-origin image in background context
-    const tryFetchImageUrl = async () => {
-      if (payload.image_url) {
-        payload.image_url = decodePotentialUrl(payload.image_url);
+    // CORS-Proof Service Worker Base64 Image Hydrator
+    async function hydrateQuestionImage(extracted, tabId) {
+      if (!extracted) return extracted;
+
+      // 1. Already Hydrated check
+      if (extracted.image_data && typeof extracted.image_data === "string" && extracted.image_data.startsWith("data:image/")) {
+        return extracted;
       }
-      if (!payload.image_data && payload.image_url && typeof fetch === "function") {
+
+      // 2. Service Worker Privileged Fetch (Primary)
+      let rawUrl = extracted.image_url;
+      if (!rawUrl && extracted.question) {
+        const match = extracted.question.match(/\[Image:\s*(https?:\/\/[^\s\]]+|https?%3A[^\s\]]+)\]/i);
+        if (match && match[1]) rawUrl = match[1].trim();
+      }
+      if (rawUrl && typeof rawUrl === "string") {
+        rawUrl = decodePotentialUrl(rawUrl);
+      }
+
+      if (rawUrl && (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) && typeof fetch === "function") {
         try {
-          const imgResp = await fetch(payload.image_url);
-          if (imgResp.ok) {
-            const blob = await imgResp.blob();
-            const b64 = await new Promise((resolve) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.onerror = () => resolve(null);
-              reader.readAsDataURL(blob);
+          const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+          const timeoutId = controller ? setTimeout(() => controller.abort(), 2500) : null;
+          const res = await fetch(rawUrl, { signal: controller ? controller.signal : undefined });
+          if (timeoutId) clearTimeout(timeoutId);
+          if (res && res.ok) {
+            const blob = await res.blob();
+            const base64Data = await new Promise((resolve) => {
+              if (typeof FileReader !== "undefined") {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(blob);
+              } else {
+                resolve(null);
+              }
             });
-            if (b64 && (b64.startsWith("data:image/png") || b64.startsWith("data:image/jpeg") || b64.startsWith("data:image/webp"))) {
-              payload.image_data = b64;
-              return true;
+            if (base64Data && typeof base64Data === "string" && base64Data.startsWith("data:image/")) {
+              extracted.image_data = base64Data;
+              return extracted;
             }
           }
         } catch (_) {}
       }
-      return false;
-    };
 
-    tryFetchImageUrl().then((fetched) => {
-      if (fetched) {
-        executeSolveFetch();
-        return;
-      }
+      // 3. Visible Tab Crop Fallback (100% Guarantee for canvas, svg, blob, or failed fetch)
+      const bbox = extracted.image_bbox || (extracted.meta && (extracted.meta.image_bbox || extracted.meta.visual_bounding_box));
+      const hasValidBbox = bbox && typeof bbox.width === "number" && typeof bbox.height === "number" && bbox.width >= 36 && bbox.height >= 36;
+      const isDiagramQuestion = hasValidBbox || (extracted.question && /\b(figure|triangle|triangles|diagram|graph|image|shown below|given below)\b/i.test(extracted.question));
 
-      // Universal captureVisibleTab Fallback for visual diagrams
-      const hasVisual = payload.meta && (payload.meta.has_visual_diagram || payload.meta.visual_bounding_box);
-      const isStemVisual = payload.question && /\b(binary tree|tree|graph|diagram|figure|image|chart|circuit|given below|shown below)\b/i.test(payload.question);
-
-      if (!payload.image_data && (hasVisual || isStemVisual) && chrome.tabs && typeof chrome.tabs.captureVisibleTab === "function") {
+      if (!extracted.image_data && (hasValidBbox || isDiagramQuestion) && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.captureVisibleTab === "function") {
         try {
-          chrome.tabs.captureVisibleTab(null, { format: "png" }, async (dataUrl) => {
-            if (!chrome.runtime.lastError && dataUrl) {
-              const bbox = payload.meta ? payload.meta.visual_bounding_box : null;
-              if (bbox && bbox.width > 20 && bbox.height > 20 && typeof OffscreenCanvas !== "undefined") {
-                try {
-                  const resp = await fetch(dataUrl);
-                  const blob = await resp.blob();
-                  const bitmap = await createImageBitmap(blob);
-                  const w = Math.min(Math.round(bbox.width), bitmap.width);
-                  const h = Math.min(Math.round(bbox.height), bitmap.height);
-                  const x = Math.max(0, Math.min(Math.round(bbox.left), bitmap.width - w));
-                  const y = Math.max(0, Math.min(Math.round(bbox.top), bitmap.height - h));
-                  const canvas = new OffscreenCanvas(w, h);
+          let targetWindowId = null;
+          if (typeof tabId === "number") {
+            try {
+              const tInfo = await new Promise(r => chrome.tabs.get(tabId, r));
+              if (tInfo && tInfo.windowId) targetWindowId = tInfo.windowId;
+            } catch (_) {}
+          } else if (tabId && typeof tabId === "object" && tabId.windowId) {
+            targetWindowId = tabId.windowId;
+          }
+          const dataUrl = await new Promise((resolve) => {
+            chrome.tabs.captureVisibleTab(targetWindowId, { format: "png" }, (res) => {
+              if (chrome.runtime.lastError || !res) resolve(null);
+              else resolve(res);
+            });
+          });
+
+          if (dataUrl) {
+            if (hasValidBbox && typeof OffscreenCanvas !== "undefined" && typeof createImageBitmap === "function") {
+              try {
+                const dpr = bbox.dpr || 1;
+                const resp = await fetch(dataUrl);
+                const blob = await resp.blob();
+                const bitmap = await createImageBitmap(blob);
+
+                const origX = bbox.x !== undefined ? bbox.x : (bbox.left || 0);
+                const origY = bbox.y !== undefined ? bbox.y : (bbox.top || 0);
+
+                const cropX = Math.max(0, Math.min(Math.round(origX * dpr), bitmap.width - 1));
+                const cropY = Math.max(0, Math.min(Math.round(origY * dpr), bitmap.height - 1));
+                const cropW = Math.min(Math.round(bbox.width * dpr), bitmap.width - cropX);
+                const cropH = Math.min(Math.round(bbox.height * dpr), bitmap.height - cropY);
+
+                if (cropW >= 36 && cropH >= 36) {
+                  const canvas = new OffscreenCanvas(cropW, cropH);
                   const ctx = canvas.getContext("2d");
-                  ctx.drawImage(bitmap, x, y, w, h, 0, 0, w, h);
+                  ctx.drawImage(bitmap, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
                   const croppedBlob = await canvas.convertToBlob({ type: "image/png" });
                   const croppedB64 = await new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve(reader.result);
-                    reader.onerror = () => resolve(null);
-                    reader.readAsDataURL(croppedBlob);
+                    if (typeof FileReader !== "undefined") {
+                      const reader = new FileReader();
+                      reader.onloadend = () => resolve(reader.result);
+                      reader.onerror = () => resolve(null);
+                      reader.readAsDataURL(croppedBlob);
+                    } else {
+                      resolve(null);
+                    }
                   });
-                  payload.image_data = croppedB64 || dataUrl;
-                } catch (_) {
-                  payload.image_data = dataUrl;
+                  if (croppedB64 && typeof croppedB64 === "string" && croppedB64.startsWith("data:image/")) {
+                    extracted.image_data = croppedB64;
+                    return extracted;
+                  }
                 }
-              } else {
-                payload.image_data = dataUrl;
-              }
+              } catch (_) {}
             }
-            executeSolveFetch();
-          });
-        } catch (_) {
-          executeSolveFetch();
-        }
-      } else {
-        executeSolveFetch();
+            extracted.image_data = dataUrl;
+          }
+        } catch (_) {}
       }
+
+      return extracted;
+    }
+
+    const resolveEffectiveTabId = async () => {
+      if (sender && sender.tab && sender.tab.id) return sender.tab.id;
+      try {
+        const targetTab = await resolveTargetTab(message, sender);
+        return targetTab ? targetTab.id : null;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    resolveEffectiveTabId().then((effTabId) => {
+      hydrateQuestionImage(payload, effTabId).then(() => {
+        executeSolveFetch();
+      }).catch(() => {
+        executeSolveFetch();
+      });
     });
     return true; // asynchronous response
   }
@@ -1469,13 +1607,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       try {
-        const injectionResults = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["extractor.js"]
-        });
+        await ensureScriptInjected(tabId, "__QUIZZY_EXTRACTOR_LOADED__", "extractor.js");
 
-        let extractionResult = (injectionResults && injectionResults[0]) ? injectionResults[0].result : null;
+        let extractionResult = null;
 
         const hasCustomParams = (message.customSelectors && Object.keys(message.customSelectors).length > 0) ||
                                 (message.forcedQType && message.forcedQType !== "auto");
@@ -1499,6 +1633,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           if (executionResults && executionResults[0] && executionResults[0].result) {
             extractionResult = executionResults[0].result;
+          }
+
+          if (!extractionResult || !extractionResult.success || !isValidExtractedQuestion(extractionResult)) {
+            await new Promise((r) => setTimeout(r, 220));
+            const retrySelectors = Object.assign({}, message.customSelectors || {}, { relaxScrollBounds: true });
+            const retryResults = await chrome.scripting.executeScript({
+              target: { tabId },
+              world: "ISOLATED",
+              func: (customSelectors, forcedQType) => {
+                const ext = window.QuizZyExtractor || window.__QuizZyExtractor;
+                if (ext && typeof ext.extractQuizFromDom === "function") {
+                  return ext.extractQuizFromDom(customSelectors, forcedQType);
+                }
+                return { success: false, error: "QuizZyExtractor was not found in the active tab context." };
+              },
+              args: [retrySelectors, message.forcedQType || "auto"]
+            });
+            if (retryResults && retryResults[0] && retryResults[0].result) {
+              extractionResult = retryResults[0].result;
+            }
           }
         }
 
@@ -1525,11 +1679,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       const tabId = targetTab.id;
       try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["extractor.js"]
-        });
+        await ensureScriptInjected(tabId, "__QUIZZY_EXTRACTOR_LOADED__", "extractor.js");
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -1579,11 +1729,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       const tabId = targetTab.id;
       try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["executor.js"]
-        });
+        await ensureScriptInjected(tabId, "__QUIZZY_EXECUTOR_LOADED__", "executor.js");
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -1618,11 +1764,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       const tabId = targetTab.id;
       try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["executor.js"]
-        });
+        await ensureScriptInjected(tabId, "__QUIZZY_EXECUTOR_LOADED__", "executor.js");
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -1662,11 +1804,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       const tabId = targetTab.id;
       try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "ISOLATED",
-          files: ["executor.js"]
-        });
+        await ensureScriptInjected(tabId, "__QUIZZY_EXECUTOR_LOADED__", "executor.js");
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -1966,6 +2104,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // 18. Portal Completion Toggle & State Synchronization
+  if (action === "PORTAL_COMPLETION_TOGGLE") {
+    resolveTargetTab(message, sender).then(async (targetTab) => {
+      if (targetTab && targetTab.id) {
+        if (targetTab.url && (/\/question\/[a-z0-9-]+/i.test(targetTab.url) || /\/assessment\//i.test(targetTab.url))) {
+          sendResponse({ success: false, refused: true, reason: "standalone_question_route" });
+          return;
+        }
+        if (typeof chrome !== "undefined" && chrome.scripting && chrome.scripting.executeScript) {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: targetTab.id },
+              world: "ISOLATED",
+              files: ["portal_completion.js"]
+            });
+          } catch (_) {}
+        }
+        chrome.tabs.sendMessage(targetTab.id, { action: "PORTAL_COMPLETION_TOGGLE" }, (res) => {
+          sendResponse(res || { success: true });
+        });
+      } else {
+        sendResponse({ success: false, error: "No target tab found" });
+      }
+    }).catch((err) => {
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+  if (action === "PORTAL_COMPLETION_STATE_CHANGED") {
+    if (sender && sender.tab && sender.tab.id) {
+      chrome.tabs.sendMessage(sender.tab.id, { action: "PORTAL_COMPLETION_STATE_CHANGED", active: Boolean(message.active) }).catch(() => {});
+    }
+    sendResponse({ success: true, active: Boolean(message.active) });
+    return false;
+  }
+
   return false;
 });
 
@@ -1980,18 +2154,43 @@ function reorderReactListInMainWorld(payload) {
 
   function cleanStr(s) {
     if (!s) return "";
-    return String(s)
-      .replace(/^[\u2800-\u28FF\u22EE\u22EF\u22F0\u22F1\u2630\uFE19::⋮⠿]+\s*/, "")
-      .replace(/^[1-8](?:[\.\)\:\-\s]+|\s+)(?=[A-Za-z`"'\<\(])/, "")
-      .replace(/^[1-8]$/, "")
-      .replace(/^\(\s*([A-Fa-f0-9]{1,2})\s*\)\s+/, "")
-      .replace(/^\[\s*([A-Fa-f0-9]{1,2})\s*\]\s+/, "")
-      .replace(/^[A-Fa-f][\.\)\:]\s+/, "")
-      .replace(/^[0-9]{1,2}[\.\)]\s+/, "")
+    let out = String(s)
       .replace(/[\u200B-\u200D\uFEFF]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
+      .replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\1\b/g, "$1")
+      .replace(/[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19]+/g, " ")
+      .replace(/::+/g, " ")
+      .trim();
+    for (let i = 0; i < 3; i++) {
+      const next = out
+        .replace(/^(\d+[\.\)\:]\s*|step\s+\d+(?:[\:\-\.]\s*|\s+))(?=\S)/i, "")
+        .replace(/^[1-8](?:[\.\)\:\-\s]+|\s+)(?=[A-Za-z`"'\<\(\$])/, "")
+        .replace(/^\(\s*([A-Fa-f0-9]{1,2})\s*\)\s+/, "")
+        .replace(/^\[\s*([A-Fa-f0-9]{1,2})\s*\]\s+/, "")
+        .replace(/^[A-Fa-f][\.\)\:]\s+/, "")
+        .replace(/^[0-9]{1,2}[\.\)]\s+/, "")
+        .replace(/^[⋮⠿∷\u2800-\u28FF\u22EE-\u22F1\u2630\uFE19:\s]+/, "")
+        .trim();
+      if (!next || next === out) break;
+      out = next;
+    }
+    return out.replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function extractRowText(el) {
+    if (!el) return "";
+    try {
+      if (typeof el.cloneNode === "function") {
+        const clone = el.cloneNode(true);
+        if (clone && typeof clone.querySelectorAll === "function") {
+          const hiddenMath = clone.querySelectorAll(".katex-mathml, .MJX_Assistive_MathML, math, annotation, script, style, svg");
+          for (const hm of hiddenMath) {
+            try { hm.remove(); } catch (_) {}
+          }
+          return cleanStr(clone.textContent || clone.innerText || "");
+        }
+      }
+    } catch (_) {}
+    return cleanStr(el.innerText || el.textContent || "");
   }
 
   // 1. Locate live option row elements in DOM
@@ -2029,13 +2228,13 @@ function reorderReactListInMainWorld(payload) {
   if (rows.length === 0) {
     const allDivs = Array.from(document.querySelectorAll("div, li, tr"));
     const matchingDivs = allDivs.filter((el) => {
-      const t = cleanStr(el.innerText || el.textContent || "");
+      const t = extractRowText(el);
       return targetTexts.some((tgt) => cleanStr(tgt) === t);
     });
     const uniqueMatches = [];
     for (const el of matchingDivs) {
-      const t = cleanStr(el.innerText || el.textContent || "");
-      if (!uniqueMatches.some((u) => cleanStr(u.innerText || u.textContent || "") === t)) {
+      const t = extractRowText(el);
+      if (!uniqueMatches.some((u) => extractRowText(u) === t)) {
         uniqueMatches.push(el);
       }
     }
@@ -2055,21 +2254,53 @@ function reorderReactListInMainWorld(payload) {
   }
 
   // Check if already in order
-  const currentTexts = rows.map(r => cleanStr(r.innerText || r.textContent || ""));
+  const currentTexts = rows.map(r => extractRowText(r));
   const targetClean = targetTexts.map(cleanStr);
-  const isAlreadyMatch = currentTexts.length === N && currentTexts.every((t, i) => t === targetClean[i] || t.includes(targetClean[i]) || targetClean[i].includes(t));
+  const isAlreadyMatch = currentTexts.length === N && currentTexts.every((t, i) => {
+    if (!t || !targetClean[i]) return false;
+    if (t === targetClean[i]) return true;
+    const tNorm = t.replace(/[^a-z0-9]/g, "");
+    const tgtNorm = targetClean[i].replace(/[^a-z0-9]/g, "");
+    if (tNorm && tgtNorm && tNorm === tgtNorm) return true;
+    if (tNorm.length >= 8 && tgtNorm.length >= 8 && (tNorm.includes(tgtNorm) || tgtNorm.includes(tNorm))) return true;
+    return false;
+  });
   if (isAlreadyMatch) {
     return { success: true, already_matched: true, method: "already_correct" };
   }
 
   const targetOrderIndices = [];
+  const usedRowIndices = new Set();
   for (let j = 0; j < N; j++) {
     const tgt = targetClean[j];
-    let foundIdx = rows.findIndex(r => {
-      const ct = cleanStr(r.innerText || r.textContent || "");
-      return ct === tgt || ct.includes(tgt) || tgt.includes(ct);
+    const tgtAlnum = tgt.replace(/[^a-z0-9]/g, "");
+    let foundIdx = rows.findIndex((r, idx) => {
+      if (usedRowIndices.has(idx)) return false;
+      const ct = currentTexts[idx];
+      return ct === tgt;
     });
-    if (foundIdx === -1) foundIdx = j;
+    if (foundIdx === -1) {
+      foundIdx = rows.findIndex((r, idx) => {
+        if (usedRowIndices.has(idx)) return false;
+        const ct = currentTexts[idx];
+        const ctAlnum = ct.replace(/[^a-z0-9]/g, "");
+        return (ct && tgt && (ct.includes(tgt) || tgt.includes(ct))) ||
+               (ctAlnum && tgtAlnum && (ctAlnum === tgtAlnum || ctAlnum.includes(tgtAlnum) || tgtAlnum.includes(ctAlnum)));
+      });
+    }
+    if (foundIdx === -1 && Array.isArray(payload.options) && payload.options.length === N) {
+      const optIdx = payload.options.findIndex((opt, idx) => !usedRowIndices.has(idx) && cleanStr(opt) === tgt);
+      if (optIdx !== -1) foundIdx = optIdx;
+    }
+    if (foundIdx === -1) {
+      for (let k = 0; k < N; k++) {
+        if (!usedRowIndices.has(k)) {
+          foundIdx = k;
+          break;
+        }
+      }
+    }
+    usedRowIndices.add(foundIdx);
     targetOrderIndices.push(foundIdx);
   }
 
@@ -2092,9 +2323,10 @@ function reorderReactListInMainWorld(payload) {
   // Walk up Fiber tree
   let curr = fiberCandidate;
   let depth = 0;
+  let invokedMethod = null;
   while (curr && depth < 35) {
     const props = curr.memoizedProps;
-    if (props) {
+    if (props && !invokedMethod) {
       // PATH 1A.1 react-sortable-hoc onSortEnd
       if (typeof props.onSortEnd === "function") {
         try {
@@ -2113,14 +2345,14 @@ function reorderReactListInMainWorld(payload) {
               simulatedList.splice(targetPos, 0, moved);
             }
           }
-          return { success: true, method: "react_sortable_hoc_onSortEnd" };
+          invokedMethod = "react_sortable_hoc_onSortEnd";
         } catch (err) {
           console.warn("[QuizZy] onSortEnd invocation error:", err);
         }
       }
 
       // PATH 1A.2 react-beautiful-dnd / @hello-pangea/dnd / @dnd-kit onDragEnd
-      if (typeof props.onDragEnd === "function") {
+      if (!invokedMethod && typeof props.onDragEnd === "function") {
         try {
           let droppableId = "droppable";
           const dropEl = document.querySelector("[data-rbd-droppable-id], [data-rfd-droppable-id]");
@@ -2129,7 +2361,13 @@ function reorderReactListInMainWorld(payload) {
           }
 
           const draggableIds = rows.map((r, idx) => {
-            return (r.getAttribute && (r.getAttribute("data-rbd-draggable-id") || r.getAttribute("data-rfd-draggable-id") || r.getAttribute("data-id") || r.getAttribute("id"))) || `item-${idx}`;
+            const directId = r.getAttribute && (r.getAttribute("data-rbd-draggable-id") || r.getAttribute("data-rfd-draggable-id") || r.getAttribute("data-rbd-drag-handle-draggable-id") || r.getAttribute("data-rfd-drag-handle-draggable-id") || r.getAttribute("data-id") || r.getAttribute("id"));
+            if (directId) return directId;
+            const childDrag = r.querySelector && r.querySelector("[data-rbd-draggable-id], [data-rfd-draggable-id], [data-rbd-drag-handle-draggable-id], [data-rfd-drag-handle-draggable-id], [data-id]");
+            if (childDrag && childDrag.getAttribute) {
+              return childDrag.getAttribute("data-rbd-draggable-id") || childDrag.getAttribute("data-rfd-draggable-id") || childDrag.getAttribute("data-rbd-drag-handle-draggable-id") || childDrag.getAttribute("data-rfd-drag-handle-draggable-id") || childDrag.getAttribute("data-id") || `item-${idx}`;
+            }
+            return `item-${idx}`;
           });
 
           let simulatedList = rows.map((_, idx) => idx);
@@ -2157,7 +2395,7 @@ function reorderReactListInMainWorld(payload) {
               simulatedList.splice(targetPos, 0, moved);
             }
           }
-          return { success: true, method: "react_rbd_onDragEnd" };
+          invokedMethod = "react_rbd_onDragEnd";
         } catch (err) {
           console.warn("[QuizZy] onDragEnd invocation error:", err);
         }
@@ -2183,7 +2421,7 @@ function reorderReactListInMainWorld(payload) {
           if (matchedAll) {
             try {
               curr.stateNode.setState({ [k]: reordered });
-              return { success: true, method: "react_class_setState", stateKey: k };
+              return { success: true, method: invokedMethod || "react_class_setState", stateKey: k };
             } catch (err) {
               console.warn("[QuizZy] setState error:", err);
             }
@@ -2213,7 +2451,7 @@ function reorderReactListInMainWorld(payload) {
             if (matchedAll) {
               try {
                 hook.queue.dispatch(reordered);
-                return { success: true, method: "react_hook_dispatch" };
+                return { success: true, method: invokedMethod || "react_hook_dispatch" };
               } catch (err) {
                 console.warn("[QuizZy] hook dispatch error:", err);
               }
@@ -2227,6 +2465,10 @@ function reorderReactListInMainWorld(payload) {
 
     curr = curr.return;
     depth++;
+  }
+
+  if (invokedMethod) {
+    return { success: true, method: invokedMethod };
   }
 
   return { success: false, error: "React Fiber tree walked but no suitable dnd handlers or state arrays found" };
@@ -3259,7 +3501,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
     let editApplied = false;
     if (editor && typeof editor.executeEdits === "function") {
       try {
-        editor.executeEdits("keyboard", [{
+        editor.executeEdits(null, [{
           range: fullRange,
           text: finalCode,
           forceMoveMarkers: true
@@ -3278,6 +3520,10 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
       } else if (model && typeof model.setValue === "function") {
         model.setValue(finalCode);
       }
+    }
+
+    if (editor && typeof editor.trigger === "function") {
+      try { editor.trigger("keyboard", "type", { text: "" }); } catch (_) {}
     }
 
     if (typeof discovered.onChange === "function") {
@@ -3332,6 +3578,8 @@ if (typeof globalThis !== "undefined") {
   globalThis.updateActionBadge = updateActionBadge;
   globalThis.readCodeFromMainWorld = readCodeFromMainWorld;
   globalThis.writeCodeWithHumanTypingInMainWorld = writeCodeWithHumanTypingInMainWorld;
+  globalThis.ensureScriptInjected = ensureScriptInjected;
+  globalThis.injectedTabScripts = injectedTabScripts;
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -3342,7 +3590,9 @@ if (typeof module !== "undefined" && module.exports) {
     handleOpenPopupHud,
     updateActionBadge,
     readCodeFromMainWorld,
-    writeCodeWithHumanTypingInMainWorld
+    writeCodeWithHumanTypingInMainWorld,
+    ensureScriptInjected,
+    injectedTabScripts
   };
 }
 

@@ -122,31 +122,37 @@
   }
 
   const HOST_ID = "__quizzy_hud_host__";
+  let activeHudAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  let healthInterval = null;
+
+  function isExtensionContextValid() {
+    return Boolean(typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id);
+  }
+
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_IS_EXTENSION_CONTEXT_VALID__ = isExtensionContextValid;
+  }
 
   function destroyInPageHudIfPresent() {
     try {
+      if (activeHudAbortController) {
+        try { activeHudAbortController.abort("HUD Destroyed"); } catch (_) {}
+        activeHudAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      }
       const doc = (typeof document !== "undefined") ? document : null;
       if (doc) {
-        const host = (typeof doc.getElementById === "function") ? doc.getElementById(HOST_ID) : null;
-        if (host) {
+        const hosts = doc.querySelectorAll ? Array.from(doc.querySelectorAll(`#${HOST_ID}, [data-quizzy-hud-host], [id*="quizzy_hud"]`)) : [];
+        const hostById = (typeof doc.getElementById === "function") ? doc.getElementById(HOST_ID) : null;
+        if (hostById && !hosts.includes(hostById)) hosts.push(hostById);
+        for (const host of hosts) {
           try {
+            if (host.shadowRoot && typeof host.shadowRoot.replaceChildren === "function") {
+              try { host.shadowRoot.replaceChildren(); } catch (_) {}
+            }
             if (typeof host.remove === "function") {
               host.remove();
             } else if (host.parentNode && typeof host.parentNode.removeChild === "function") {
               host.parentNode.removeChild(host);
-            }
-          } catch (_) { }
-        }
-        if (typeof doc.querySelectorAll === "function") {
-          try {
-            const staleHosts = doc.querySelectorAll(`#${HOST_ID}, [id*="quizzy_hud"]`);
-            if (staleHosts && staleHosts.length > 0) {
-              for (const sh of staleHosts) {
-                try {
-                  if (typeof sh.remove === "function") sh.remove();
-                  else if (sh.parentNode && typeof sh.parentNode.removeChild === "function") sh.parentNode.removeChild(sh);
-                } catch (_) { }
-              }
             }
           } catch (_) { }
         }
@@ -162,18 +168,20 @@
             try { delete window.__QUIZZY_HUD_INSTANCE__; } catch (_) { window.__QUIZZY_HUD_INSTANCE__ = null; }
           }
         }
+        window.__QUIZZY_HUD_SHADOW_ROOT__ = null;
       }
     } catch (_) { }
   }
 
-  // Hook SPA navigation transitions without duplicate listeners or unnecessary polling
+  // Hook SPA navigation transitions without monkey-patching prototypes or duplicate listeners
   function setupSpaNavigationListeners() {
     if (typeof window === "undefined") return;
     if (window.__QUIZZY_SPA_LISTENERS_INITIALIZED__) return;
     window.__QUIZZY_SPA_LISTENERS_INITIALIZED__ = true;
 
-    const onNavigation = () => {
-      if (isProctoredCodingPage()) {
+    const onNavigation = (newUrl) => {
+      const urlToCheck = newUrl || (window.location ? window.location.href : "");
+      if (isProctoredCodingPage() || /\/question\/[a-z0-9-]+/i.test(urlToCheck)) {
         destroyInPageHudIfPresent();
         const codingInst = getActiveCodingHudInstance();
         setupStealthCodingKeyboardShortcuts(codingInst);
@@ -187,28 +195,11 @@
       }
     };
 
-    if (typeof window.addEventListener === "function") {
-      window.addEventListener("popstate", onNavigation);
-      window.addEventListener("hashchange", onNavigation);
-    }
+    window.__QUIZZY_HUD_ON_NAVIGATION__ = onNavigation;
 
-    if (typeof history !== "undefined") {
-      if (typeof history.pushState === "function") {
-        const origPush = history.pushState;
-        history.pushState = function (...args) {
-          const res = origPush.apply(this, args);
-          try { onNavigation(); } catch (_) { }
-          return res;
-        };
-      }
-      if (typeof history.replaceState === "function") {
-        const origReplace = history.replaceState;
-        history.replaceState = function (...args) {
-          const res = origReplace.apply(this, args);
-          try { onNavigation(); } catch (_) { }
-          return res;
-        };
-      }
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("popstate", () => onNavigation());
+      window.addEventListener("hashchange", () => onNavigation());
     }
   }
 
@@ -280,6 +271,12 @@
       }
     }
     .hud-mini-dot.glow-blue { background: #93C5FD !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.6), 0 0 4px 1.5px rgba(96, 165, 250, 0.4), 0 0 7px 2px rgba(191, 219, 254, 0.3) !important; animation: none !important; }
+    .hud-mini-dot.glow-violet { background: #a855f7 !important; border: 1px solid #FFFFFF !important; box-shadow: 0 0 10px #a855f7, 0 0 20px #7c3aed !important; animation: quizzyVioletPulse 0.9s infinite ease-in-out !important; }
+    @keyframes quizzyVioletPulse {
+      0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px #a855f7, 0 0 20px #7c3aed; }
+      50% { opacity: 0.25; transform: scale(0.82); box-shadow: 0 0 4px #a855f7, 0 0 8px #7c3aed; }
+    }
+    .hud-mini-dot.portal-running { animation: quizzyVioletPulse 0.9s infinite ease-in-out !important; }
     .hud-mini-dot.auto-running { animation: hud-dot-pulse-green 1.2s infinite ease-in-out !important; }
   `;
 
@@ -356,6 +353,14 @@
       backendPollTimer = null;
     }
     backendPollTimer = setInterval(() => {
+      if (!isExtensionContextValid()) {
+        if (backendPollTimer) {
+          clearInterval(backendPollTimer);
+          backendPollTimer = null;
+        }
+        destroyInPageHudIfPresent();
+        return;
+      }
       attempts++;
       if (checkFn) {
         checkFn((isOnline) => {
@@ -775,6 +780,14 @@
     checkCodingHealth();
     if (inst && !inst.__codingHealthInterval__) {
       inst.__codingHealthInterval__ = setInterval(() => {
+        if (!isExtensionContextValid()) {
+          if (inst.__codingHealthInterval__) {
+            clearInterval(inst.__codingHealthInterval__);
+            inst.__codingHealthInterval__ = null;
+          }
+          destroyInPageHudIfPresent();
+          return;
+        }
         checkCodingHealth();
       }, 3000);
       if (inst.__codingHealthInterval__ && typeof inst.__codingHealthInterval__.unref === "function") {
@@ -963,13 +976,17 @@
       shiftComboUsed = false;
     };
 
-    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    if (typeof window !== "undefined" && !window.__QUIZZY_STEALTH_SHORTCUTS_ATTACHED__) {
+      window.__QUIZZY_STEALTH_SHORTCUTS_ATTACHED__ = true;
       window.__QUIZZY_STEALTH_SHORTCUT_HANDLER__ = onStealthCodingKeyDown;
-      window.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
-      window.addEventListener("keyup", onStealthCodingKeyUp, { capture: true, passive: false });
-      window.addEventListener("pointerdown", onStealthCodingPointerDown, { capture: true, passive: true });
-      window.addEventListener("blur", onStealthCodingBlur);
-    } else if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      if (typeof window.addEventListener === "function") {
+        window.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
+        window.addEventListener("keyup", onStealthCodingKeyUp, { capture: true, passive: false });
+        window.addEventListener("pointerdown", onStealthCodingPointerDown, { capture: true, passive: true });
+        window.addEventListener("blur", onStealthCodingBlur);
+      }
+    } else if (typeof document !== "undefined" && !document.__QUIZZY_STEALTH_SHORTCUTS_ATTACHED__ && typeof document.addEventListener === "function") {
+      document.__QUIZZY_STEALTH_SHORTCUTS_ATTACHED__ = true;
       document.addEventListener("keydown", onStealthCodingKeyDown, { capture: true, passive: false });
       document.addEventListener("keyup", onStealthCodingKeyUp, { capture: true, passive: false });
       document.addEventListener("pointerdown", onStealthCodingPointerDown, { capture: true, passive: true });
@@ -1299,6 +1316,12 @@
     .hud-health-dot.online {
       background: #60A5FA;
       box-shadow: 0 0 5px rgba(96, 165, 250, 0.7);
+    }
+
+    .hud-health-dot.portal-active {
+      background: #a855f7 !important;
+      box-shadow: 0 0 10px #a855f7, 0 0 20px #7c3aed !important;
+      animation: quizzyVioletPulse 0.9s infinite ease-in-out !important;
     }
 
     .hud-health-dot.solving {
@@ -1747,19 +1770,37 @@
   let lastSolvedTime = 0;
   let isSidePanelOpen = false;
   let backendOnline = false;
+  let portalCompletionActive = false;
   let autoErrorOccurred = false;
   let autoErrorMessage = "";
 
   function updateDotState() {
     if (!miniDot) return;
     if (miniDot.classList) {
-      miniDot.classList.remove("glow-red", "glow-green", "glow-orange", "glow-blue", "auto-running");
+      miniDot.classList.remove("glow-red", "glow-green", "glow-orange", "glow-blue", "glow-violet", "auto-running", "portal-running");
+    }
+    if (healthDot && !portalCompletionActive) {
+      healthDot.classList.remove("portal-active");
     }
 
-    if (autoErrorOccurred) {
+    if (portalCompletionActive) {
+      // Portal Completion active: Flashing Vibrant Violet dot
+      if (miniDot.classList) {
+        miniDot.classList.add("glow-violet", "portal-running");
+      }
+      miniDot.title = "QuizZy Portal Completion: Active (Ctrl + Alt + 0 to stop)";
+      if (healthDot) {
+        healthDot.className = "hud-health-dot portal-active";
+        healthDot.title = "Portal Completion: Active";
+      }
+    } else if (autoErrorOccurred) {
       // 3. If working in auto mode but errors occur, it should glow orange
       if (miniDot.classList) miniDot.classList.add("glow-orange");
       miniDot.title = `QuizZy Auto Mode Error: ${autoErrorMessage || "Error occurred"} (Click dot to restart)`;
+      if (healthDot) {
+        healthDot.className = "hud-health-dot";
+        healthDot.title = `Auto Mode Error: ${autoErrorMessage || "Error occurred"}`;
+      }
     } else if (isAutoRunning) {
       // 2. When working in auto mode with no errors, it should glow green
       if (miniDot.classList) {
@@ -1767,15 +1808,53 @@
         miniDot.classList.add("auto-running");
       }
       miniDot.title = "QuizZy Auto Mode: Running (Press Shift or click dot to stop)";
+      if (healthDot) {
+        healthDot.className = "hud-health-dot solving";
+        healthDot.title = "Auto Mode: Running";
+      }
     } else if (!backendOnline) {
       // 1. If the backend is not running, the dot should glow red
       if (miniDot.classList) miniDot.classList.add("glow-red");
       miniDot.title = "QuizZy: Backend Offline (Click dot to start backend)";
+      if (healthDot) {
+        healthDot.className = "hud-health-dot";
+        healthDot.title = "Backend: Offline (Click to start backend)";
+      }
     } else {
       // Default: Connected & Idle
       if (miniDot.classList) miniDot.classList.add("glow-blue");
       miniDot.title = "QuizZy: Connected & Ready (Press Shift to toggle Auto Mode)";
+      if (healthDot) {
+        healthDot.className = "hud-health-dot online";
+        healthDot.title = "Backend: Online";
+      }
     }
+  }
+
+  function togglePortalCompletion() {
+    // Route Safety Guard
+    try {
+      const loc = (typeof window !== "undefined") ? window.location : null;
+      const pathname = (loc && loc.pathname) ? loc.pathname : "";
+      if (/\/question\/[a-z0-9-]+/i.test(pathname) || /\/assessment\/|\/test-runner\//i.test(pathname)) {
+        return false;
+      }
+    } catch (_) {}
+
+    if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.toggle === "function") {
+      const active = window.QuizZyPortalCompletion.toggle();
+      portalCompletionActive = Boolean(active);
+      updateDotState();
+      return portalCompletionActive;
+    }
+    portalCompletionActive = !portalCompletionActive;
+    updateDotState();
+    try {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_STATE_CHANGED", active: portalCompletionActive }).catch(() => {});
+      }
+    } catch (_) {}
+    return portalCompletionActive;
   }
 
   // Query background for side panel presence on startup (mutual exclusivity)
@@ -2106,13 +2185,42 @@
   }
 
   checkHealth();
-  const healthInterval = setInterval(checkHealth, 2500);
-  if (healthInterval && typeof healthInterval.unref === "function") {
-    healthInterval.unref();
+  function startHealthLoop() {
+    if (healthInterval) clearInterval(healthInterval);
+    const intervalMs = (typeof document !== "undefined" && document.visibilityState === "hidden") ? 25000 : 8000;
+    healthInterval = setInterval(() => {
+      if (!isExtensionContextValid()) {
+        if (healthInterval) {
+          clearInterval(healthInterval);
+          healthInterval = null;
+        }
+        destroyInPageHudIfPresent();
+        return;
+      }
+      checkHealth();
+    }, intervalMs);
+    if (healthInterval && typeof healthInterval.unref === "function") {
+      healthInterval.unref();
+    }
+  }
+  startHealthLoop();
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkHealth();
+      startHealthLoop();
+    });
+  }
+
+  // Cross-script deduplicated health listener: immediately update dot state when ccbp_lifecycle_bridge heartbeats
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_ON_BACKEND_HEALTH_UPDATE__ = (isHealthy) => {
+      isBackendOnline = Boolean(isHealthy);
+      updateDotState();
+    };
   }
 
   // ==========================================================================
-  // Question Signature for Stuck-Detection
+  // Question Signature for Stuck-Detection & Lightweight Pre-Checking
   // ==========================================================================
   function getQuestionSig(ext) {
     if (!ext) return "";
@@ -2127,6 +2235,28 @@
     const opts = Array.isArray(ext.options) ? ext.options.join("|") : "";
     const img = ext.image_url || (ext.image_data ? ext.image_data.length : "");
     return `${q}::${opts}::${img}`;
+  }
+
+  function getLightweightQuestionFingerprint(docRef) {
+    const doc = docRef || (typeof document !== "undefined" ? document : null);
+    if (!doc) return "";
+    try {
+      const loc = (typeof window !== "undefined" && window.location) ? (window.location.pathname + window.location.search) : "";
+      const stripTimers = (s) => (s || "").replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "").trim();
+      const stemEl = doc.querySelector ? doc.querySelector(".sc-question-stem, .question-stem, [class*='question-text'], [class*='question-body'], [data-quiz-question], .quiz-question, [class*='stem'], [class*='prompt'], h1, h2, h3, p") : null;
+      const stem = stemEl ? stripTimers(stemEl.textContent).slice(0, 100) : "";
+      const counterEl = doc.querySelector ? doc.querySelector(".question-number, [class*='question-number'], [class*='questionNumber'], [class*='QuestionNumber'], [data-question-index], [class*='progress' i]") : null;
+      const counter = counterEl ? stripTimers(counterEl.textContent).slice(0, 40) : "";
+      const firstOptEl = doc.querySelector ? doc.querySelector("input[type='radio'], [role='radio'], .quiz-option, [class*='option-item'], [data-quiz-option], [class*='quiz-option'], label[class*='option'], [role='option']") : null;
+      const firstOpt = firstOptEl ? stripTimers(firstOptEl.textContent || firstOptEl.value || "").slice(0, 50) : "";
+      return `${loc}::${counter}::${stem}::${firstOpt}`;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_GET_LIGHTWEIGHT_FINGERPRINT__ = getLightweightQuestionFingerprint;
   }
 
   // ==========================================================================
@@ -2295,9 +2425,12 @@
   // ==========================================================================
   // Core Extraction, Solve & Execution Routines
   // ==========================================================================
-  function extractCurrentQuiz() {
+  function extractCurrentQuiz(options) {
     if (window.__QuizZyExtractor && typeof window.__QuizZyExtractor.extractQuizFromDom === "function") {
       try {
+        if (options && typeof options === "object") {
+          return window.__QuizZyExtractor.extractQuizFromDom(options, "auto", document);
+        }
         return window.__QuizZyExtractor.extractQuizFromDom(document);
       } catch (err) {
         console.error("[QuizZy HUD] Extraction error:", err);
@@ -2316,18 +2449,24 @@
     const type = (q.q_type || "mcq").toLowerCase();
     if (["mcq", "multi", "order"].includes(type)) {
       const validOpts = Array.isArray(q.options)
-        ? q.options.filter(o => o && (typeof o === "string" ? o.trim().length > 0 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length > 0 : true)))
+        ? q.options.filter(o => o !== null && o !== undefined && (typeof o === "string" ? o.trim().length >= 1 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length >= 1 : String(o).trim().length >= 1)))
         : [];
       if (validOpts.length < 2) return false;
     }
     return true;
   }
 
-  function solveCurrentQuestion(callback) {
+  function solveCurrentQuestion(callback, isRetry = false) {
     if (isSolving) return;
-    const extracted = extractCurrentQuiz();
+    const extracted = extractCurrentQuiz(isRetry ? { relaxScrollBounds: true } : undefined);
 
     if (!extracted || !extracted.success || !isValidExtractedQuestion(extracted)) {
+      if (!isRetry) {
+        setTimeout(() => {
+          solveCurrentQuestion(callback, true);
+        }, 220);
+        return;
+      }
       if (answerText) {
         answerText.className = "hud-answer-text uncertain";
         answerText.textContent = "No quiz question detected on page";
@@ -2354,6 +2493,8 @@
       starter_code: (extracted && extracted.starter_code) ? extracted.starter_code : null,
       image_data: (extracted && extracted.image_data) ? extracted.image_data : null,
       image_url: (extracted && extracted.image_url) ? extracted.image_url : null,
+      svg_data: (extracted && extracted.svg_data) ? extracted.svg_data : null,
+      image_bbox: (extracted && extracted.image_bbox) ? extracted.image_bbox : null,
       meta: (extracted && extracted.meta) ? extracted.meta : null
     };
 
@@ -2421,7 +2562,14 @@
       backendOnline = true;
       lastSolvedSignature = currentSig;
       lastSolvedTime = Date.now();
+      if (!isAutoRunning && manualSolvePendingAdvance) {
+        manualSolvePendingAdvance = false;
+        recordQuestionSolveForRecycle();
+      }
       renderSolution(res.data, extracted);
+      if (!isAutoRunning) {
+        manualSolvePendingAdvance = true;
+      }
       if (callback) callback(res.data, extracted);
     });
   }
@@ -2435,11 +2583,11 @@
     let targetIndex = null;
     if (typeof solveData.selected_index === "number" && solveData.selected_index >= 0 && (options.length === 0 || solveData.selected_index < options.length)) {
       targetIndex = solveData.selected_index;
-    } else if (typeof solveData.canonical_key === "string" && /^[A-F]$/i.test(solveData.canonical_key.trim())) {
+    } else if (typeof solveData.canonical_key === "string" && /^[A-P]$/i.test(solveData.canonical_key.trim())) {
       targetIndex = solveData.canonical_key.trim().toUpperCase().charCodeAt(0) - 65;
-    } else if (typeof solveData.answer === "string" && /^[A-F]$/i.test(solveData.answer.trim())) {
+    } else if (typeof solveData.answer === "string" && /^[A-P]$/i.test(solveData.answer.trim())) {
       targetIndex = solveData.answer.trim().toUpperCase().charCodeAt(0) - 65;
-    } else if (typeof solveData.letter === "string" && /^[A-F]$/i.test(solveData.letter.trim())) {
+    } else if (typeof solveData.letter === "string" && /^[A-P]$/i.test(solveData.letter.trim())) {
       targetIndex = solveData.letter.trim().toUpperCase().charCodeAt(0) - 65;
     } else if (options.length > 0) {
       const matchText = solveData.selected_text || solveData.selected_option || solveData.answer;
@@ -2525,18 +2673,108 @@
     });
   }
 
+  let questionsSolvedSinceRecycle = 0;
+  const QUESTIONS_PER_RECYCLE = 1;
+  const DEFAULT_QUESTIONS_PER_RECYCLE = QUESTIONS_PER_RECYCLE;
+  let manualSolvePendingAdvance = false;
+
+  function getRecycleInterval() {
+    if (typeof window !== "undefined" && typeof window.__QUIZZY_RECYCLE_INTERVAL__ === "number" && window.__QUIZZY_RECYCLE_INTERVAL__ > 0) {
+      return window.__QUIZZY_RECYCLE_INTERVAL__;
+    }
+    return DEFAULT_QUESTIONS_PER_RECYCLE;
+  }
+
+  function registerRecycleHandler(handler) {
+    if (typeof window === "undefined") return;
+    if (!Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__ = [];
+    }
+    if (typeof handler === "function" && !window.__QUIZZY_RECYCLE_HANDLERS__.includes(handler)) {
+      window.__QUIZZY_RECYCLE_HANDLERS__.push(handler);
+    }
+    if (typeof window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ !== "function") {
+      window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ = function () {
+        if (Array.isArray(window.__QUIZZY_RECYCLE_HANDLERS__)) {
+          for (const fn of window.__QUIZZY_RECYCLE_HANDLERS__) {
+            try {
+              if (typeof fn === "function") fn();
+            } catch (err) {
+              console.warn("[QuizZy Recycle] Handler failed:", err);
+            }
+          }
+        }
+      };
+    }
+  }
+
+  function recycleHudMemory() {
+    resetSolutionDisplay();
+    lastSolvedSignature = "";
+    lastSolvedTime = 0;
+  }
+  registerRecycleHandler(recycleHudMemory);
+
+  function resetQuestionLifecycleState() {
+    questionsSolvedSinceRecycle = 0;
+    try {
+      if (typeof window !== "undefined" && typeof window.__QUIZZY_RECYCLE_CONTENT_MEMORY__ === "function") {
+        window.__QUIZZY_RECYCLE_CONTENT_MEMORY__();
+      }
+      if (typeof window !== "undefined" && window.QuizZyExtractor && typeof window.QuizZyExtractor.resetQuestionLifecycleState === "function") {
+        window.QuizZyExtractor.resetQuestionLifecycleState();
+      }
+      if (typeof window !== "undefined" && window.QuizZyExecutor && typeof window.QuizZyExecutor.resetQuestionLifecycleState === "function") {
+        window.QuizZyExecutor.resetQuestionLifecycleState();
+      }
+    } catch (_) {}
+
+    resetSolutionDisplay();
+
+    if (isExtensionContextValid()) {
+      try {
+        chrome.runtime.sendMessage({ type: "QUIZZY_PERFORM_SOFT_RECYCLE", action: "QUIZZY_RESET_QUESTION_STATE" }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) { /* ignore */ }
+        });
+      } catch (_) {}
+    }
+  }
+
+  function performSoftMemoryRecycle() {
+    resetQuestionLifecycleState();
+  }
+
+  function recordQuestionSolveForRecycle() {
+    questionsSolvedSinceRecycle++;
+    if (questionsSolvedSinceRecycle >= getRecycleInterval()) {
+      resetQuestionLifecycleState();
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.resetQuestionLifecycleState = resetQuestionLifecycleState;
+    window.__QUIZZY_RESET_QUESTION_STATE__ = resetQuestionLifecycleState;
+    window.__QUIZZY_PERFORM_SOFT_RECYCLE__ = performSoftMemoryRecycle;
+    window.__QUIZZY_RECORD_SOLVE_CYCLE__ = recordQuestionSolveForRecycle;
+    window.__QUIZZY_GET_SOLVES_SINCE_RECYCLE__ = () => questionsSolvedSinceRecycle;
+  }
+
   function clickNextOnPage(callback) {
+    manualSolvePendingAdvance = false;
     const exec = window.__QuizZyExecutor || window.QuizZyExecutor;
     if (exec && typeof exec.clickNextButton === "function") {
       exec.clickNextButton().then((res) => {
+        recordQuestionSolveForRecycle();
         if (callback) callback(res);
       }).catch((err) => {
+        recordQuestionSolveForRecycle();
         if (callback) callback({ ok: false, error: err.message });
       });
       return;
     }
 
     sendExtensionMessage({ action: "CLICK_NEXT_BUTTON" }, (res) => {
+      recordQuestionSolveForRecycle();
       if (callback) callback(res && res.result ? res.result : res);
     });
   }
@@ -2703,21 +2941,25 @@
       const isStrict = chkStrict && chkStrict.checked;
       const hasValidSelection = solution && (
         (typeof solution.selected_index === "number" && solution.selected_index >= 0) ||
+        (Array.isArray(solution.selected_indices) && solution.selected_indices.length > 0) ||
+        (Array.isArray(solution.ordered_texts) && solution.ordered_texts.length > 0) ||
+        (Array.isArray(solution.permutation_indices) && solution.permutation_indices.length > 0) ||
         (solution.answer && typeof solution.answer === "string" && solution.answer.trim().length > 0) ||
         (solution.canonical_key && typeof solution.canonical_key === "string" && solution.canonical_key.trim().length > 0) ||
         (solution.selected_text && typeof solution.selected_text === "string" && solution.selected_text.trim().length > 0)
       );
 
       if (!hasValidSelection) {
-        // If question cannot be parsed or solved yet (e.g. rate-limit or loading), back off 10s
+        // Fast, resilient retry for SPA render latency; back off to 8s only on sustained failure
         if (!stepSettled && isAutoRunning && currentEpoch === autoStepEpoch) {
           autoErrorOccurred = true;
-          autoErrorMessage = "Cannot solve question or rate limit backoff";
+          autoErrorMessage = "Question loading or unparsed";
           updateDotState();
-          if (autoRetryCount < 2) {
+          if (autoRetryCount < 3) {
             autoRetryCount++;
-            console.warn("[QuizZy HUD] Solve failed/empty, backing off 10s before retry (" + autoRetryCount + "/2)...");
-            setTimeout(runAutoStep, 10000);
+            const backoffMs = autoRetryCount === 1 ? 400 : (autoRetryCount === 2 ? 1000 : 8000);
+            console.warn(`[QuizZy HUD] Solve failed/empty, retrying in ${backoffMs}ms (${autoRetryCount}/3)...`);
+            setTimeout(runAutoStep, backoffMs);
             return;
           }
           stepSettled = true;
@@ -2774,6 +3016,7 @@
         }
 
         // Fast delay before clicking Submit / Next for React state commit (120ms)
+        const prevLightweight = getLightweightQuestionFingerprint(document);
         setTimeout(() => {
           if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
 
@@ -2797,33 +3040,47 @@
               return;
             }
 
-            // Snappy poll for question advance using composite signature (75ms interval)
+            // Lightweight non-thrashing poll for question advance (160ms interval)
             let pollAttempts = 0;
             const pollInterval = setInterval(() => {
+              if (!isExtensionContextValid()) {
+                clearInterval(pollInterval);
+                destroyInPageHudIfPresent();
+                return;
+              }
               if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) {
                 clearInterval(pollInterval);
                 return;
               }
 
               pollAttempts++;
-              let currentExt = null;
-              if (window.__QuizZyExtractor && typeof window.__QuizZyExtractor.extractQuizFromDom === "function") {
-                currentExt = window.__QuizZyExtractor.extractQuizFromDom(document);
+
+              // 1. Fast lightweight check first without cloning or KaTeX parsing
+              const curLightweight = getLightweightQuestionFingerprint(document);
+              const lightweightChanged = curLightweight && curLightweight !== prevLightweight;
+
+              // 2. Invoke full extractor if lightweight signature changed or at safe fallback checkpoints (attempt 6 ~960ms, attempt 14 ~2.2s, or final attempt)
+              let newSig = "";
+              if (lightweightChanged || pollAttempts === 6 || pollAttempts === 14 || pollAttempts >= 36) {
+                let currentExt = null;
+                if (window.__QuizZyExtractor && typeof window.__QuizZyExtractor.extractQuizFromDom === "function") {
+                  currentExt = window.__QuizZyExtractor.extractQuizFromDom(document);
+                }
+                newSig = getQuestionSig(currentExt);
               }
 
-              const newSig = getQuestionSig(currentExt);
               if (newSig && newSig !== prevSig) {
                 clearInterval(pollInterval);
                 stepSettled = true;
                 autoErrorOccurred = false;
                 autoErrorMessage = "";
-                resetSolutionDisplay();
+                resetQuestionLifecycleState();
                 updateDotState();
                 setTimeout(runAutoStep, 80);
                 return;
               }
 
-              if (pollAttempts >= 80) { // 80 * 75ms = 6s timeout
+              if (pollAttempts >= 36) { // 36 * 160ms = ~5.7s timeout
                 clearInterval(pollInterval);
                 if (!stepSettled) {
                   stepSettled = true;
@@ -2832,7 +3089,7 @@
                   stopAutoMode("Question did not advance after submit.");
                 }
               }
-            }, 75);
+            }, 160);
           });
         }, 120);
       }, solution, extracted);
@@ -3199,6 +3456,14 @@
       }
     }
 
+    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+      e.__quizzy_handled__ = true;
+      togglePortalCompletion();
+      return;
+    }
+
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const key = (e.key || "").toLowerCase();
       const code = e.code || "";
@@ -3420,9 +3685,22 @@
 
   // Runtime message listener for background commands & shortcuts
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!message || !message.action) return false;
-      if (message.action === "KILL_SWITCH_TRIGGERED") {
+    if (typeof window !== "undefined" && !window.__QUIZZY_HUD_MSG_LISTENER__) {
+      window.__QUIZZY_HUD_MSG_LISTENER__ = true;
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!message || !message.action) return false;
+        if (message.action === "QUIZZY_ROUTE_CHANGED") {
+          if (typeof window.__QUIZZY_HUD_ON_NAVIGATION__ === "function") {
+            window.__QUIZZY_HUD_ON_NAVIGATION__(message.url);
+          } else if (isProctoredCodingPage() || (message.url && /\/question\/[a-z0-9-]+/i.test(message.url))) {
+            destroyInPageHudIfPresent();
+          } else {
+            hide();
+          }
+          if (typeof sendResponse === "function") sendResponse({ success: true });
+          return;
+        }
+        if (message.action === "KILL_SWITCH_TRIGGERED") {
         if (isAutoRunning) {
           stopAutoMode(message.reason || "Kill switch triggered.");
         }
@@ -3452,6 +3730,17 @@
         if (typeof sendResponse === "function") sendResponse({ success: true, isSidePanelOpen });
         return true;
       }
+      if (message.action === "PORTAL_COMPLETION_STATE_CHANGED") {
+        portalCompletionActive = Boolean(message.active);
+        updateDotState();
+        if (typeof sendResponse === "function") sendResponse({ success: true, portalCompletionActive });
+        return;
+      }
+      if (message.action === "PORTAL_COMPLETION_TOGGLE") {
+        togglePortalCompletion();
+        if (typeof sendResponse === "function") sendResponse({ success: true, portalCompletionActive });
+        return;
+      }
       if (message.action === "SHORTCUT_ACTION") {
         const cmd = message.command;
         if (cmd === "trigger_solve") {
@@ -3479,6 +3768,7 @@
         return true;
       }
     });
+    }
   }
 
   // ==========================================================================
@@ -3500,6 +3790,7 @@
     isHidden: () => isHiddenState,
     isMinimized: () => isMinimizedState,
     get isAutoRunning() { return isAutoRunning; },
+    get portalCompletionActive() { return portalCompletionActive; },
     get isSidePanelOpen() { return isSidePanelOpen; },
     get isBackendOnline() { return backendOnline; },
     get autoErrorOccurred() { return autoErrorOccurred; },
@@ -3520,11 +3811,25 @@
     next: clickNextOnPage,
     startAuto: startAutoMode,
     stopAuto: stopAutoMode,
+    setPortalCompletionActive: (val) => {
+      portalCompletionActive = Boolean(val);
+      updateDotState();
+    },
+    getPortalCompletionActive: () => portalCompletionActive,
+    togglePortalCompletion,
     destroy: () => {
-      clearInterval(healthInterval);
+      if (healthInterval) {
+        clearInterval(healthInterval);
+        healthInterval = null;
+      }
+      if (activeHudAbortController) {
+        try { activeHudAbortController.abort("HUD Destroyed"); } catch (_) {}
+      }
       if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
         window.removeEventListener("keydown", onGlobalKeyDown, true);
         window.removeEventListener("keyup", onGlobalKeyUp, true);
+        window.removeEventListener("pointerdown", onGlobalPointerDown, true);
+        window.removeEventListener("blur", resetGlobalModifierStates);
       }
       if (host && host.parentNode) {
         host.parentNode.removeChild(host);
@@ -3550,6 +3855,7 @@
     miniDot,
     ...hudInstance,
     get isAutoRunning() { return isAutoRunning; },
+    get portalCompletionActive() { return portalCompletionActive; },
     get isSidePanelOpen() { return isSidePanelOpen; },
     get isBackendOnline() { return backendOnline; },
     get autoErrorOccurred() { return autoErrorOccurred; },

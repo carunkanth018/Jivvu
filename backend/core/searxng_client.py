@@ -230,10 +230,8 @@ async def fetch_searxng_snippets(
     if os.environ.get("QUIZZY_OFFLINE_TEST_MODE") == "1":
         allow_fallback = False
 
-    # Check circuit breaker
+    # Check circuit breaker: fail open immediately (< 5 ms)
     if is_searxng_circuit_open():
-        if allow_fallback and enabled:
-            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []
 
     if not enabled:
@@ -280,18 +278,11 @@ async def fetch_searxng_snippets(
             if snippets:
                 return snippets
 
-        # If SearXNG returned non-200 or no snippets, try fallback
-        if allow_fallback:
-            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []
 
-    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        # Trip circuit breaker for 60 seconds
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        # Trip circuit breaker for 60 seconds and fail open immediately
         _circuit_open_until = time.time() + 60.0
-        if allow_fallback:
-            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []
     except (httpx.TimeoutException, httpx.HTTPError, Exception):
-        if allow_fallback:
-            return await fetch_duckduckgo_snippets(client, query, timeout_ms=max(timeout_ms, 1500))
         return []

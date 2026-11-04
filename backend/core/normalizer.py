@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 
 
 SYNTHETIC_LABELS = ("A", "B", "C", "D", "E", "F")
-ORDER_SYNTHETIC_LABELS = ("A", "B", "C", "D", "E", "F", "G", "H")
+ORDER_SYNTHETIC_LABELS = ("A", "B", "C", "D", "E", "F")
+EXTENDED_SYNTHETIC_LABELS = tuple(chr(65 + i) for i in range(26))
 
 
 class NormalizationError(ValueError):
@@ -136,18 +137,20 @@ def parse_math_numeric_value(val: Any) -> Optional[float]:
     if val is None:
         return None
     s = str(val).strip()
-    # Strip decorative prefix if present e.g. "Option D: 2/36" -> "2/36"
-    s = re.sub(r"^(?:option|choice)?\s*[\(\[]?[A-Fa-f][\)\]]?[\.\:\-\s]+", "", s, flags=re.IGNORECASE).strip()
+    # Strip decorative prefix if present e.g. "Option D: 2/36" -> "2/36", preserving negative numbers on "Option B: -2"
+    s = re.sub(r"^(?:option|choice)?\s*[\(\[]?[A-Fa-f][\)\]]?(?:[\.\:\)]|\s+-(?!\s*-?\d)|\s+)\s*", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^-\s+(\d)", r"-\1", s)
     if not s:
         return None
-    # LaTeX frac e.g. \frac{1}{18} or \dfrac{2}{36}
-    frac_match = re.search(r"\\d?frac\{([^{}]+)\}\{([^{}]+)\}", s)
+    # LaTeX frac e.g. \frac{1}{18} or \dfrac{2}{36} or -\frac{1}{2}
+    frac_match = re.search(r"(-?)\s*\\d?frac\{([^{}]+)\}\{([^{}]+)\}", s)
     if frac_match:
         try:
-            num = float(frac_match.group(1).strip())
-            den = float(frac_match.group(2).strip())
+            sign = -1.0 if frac_match.group(1) == "-" else 1.0
+            num = float(frac_match.group(2).strip())
+            den = float(frac_match.group(3).strip())
             if den != 0:
-                return num / den
+                return sign * (num / den)
         except Exception:
             pass
     # Standard fraction a/b: e.g. 1/18, 2/36, -1/6
@@ -242,18 +245,56 @@ def normalize_complexity_expr(text: Any) -> Optional[str]:
     return s
 
 
+def normalize_code_snippet(text: str) -> str:
+    """
+    Normalizes multi-line and single-line code snippets for robust option matching:
+    - Strips markdown code fences and backticks.
+    - Strips standalone language badge prefixes (SQL, JAVASCRIPT, JS, PYTHON, HTML, etc.).
+    - Strips line number prefixes per line (e.g. '1 ', '2: ', '3 | ').
+    - Normalizes quotes and spacing.
+    - Collapses internal whitespace to single space.
+    """
+    if not text:
+        return ""
+    s = unicodedata.normalize("NFKC", str(text)).strip()
+    # Strip fences & backticks
+    s = re.sub(r"^```[a-zA-Z0-9_\-]*\n?|```$", "", s).strip()
+    s = re.sub(r"^`+|`+$", "", s).strip()
+
+    # Strip standalone badge header lines (e.g. "SQL\n", "JAVASCRIPT\n")
+    lines = s.split("\n")
+    cleaned_lines = []
+    badge_pattern = re.compile(r"^(?:JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH|COPY|COPIED)$", re.IGNORECASE)
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if badge_pattern.match(stripped):
+            continue
+        # Strip leading line numbers (e.g. "1 ", "1: ", "1 | ", "1.")
+        stripped = re.sub(r"^\s*\d{1,4}\s*[:\|\.]?\s+", "", stripped)
+        cleaned_lines.append(stripped)
+
+    reconstructed = " ".join(cleaned_lines) if cleaned_lines else s
+    # Strip leading badge word if single line (e.g. "SQL SELECT ...")
+    reconstructed = re.sub(r"^(?:JAVASCRIPT|JS|SQL|PYTHON|PY|HTML|CSS|JAVA|C\+\+|CPP|JSON|BASH|SH)\s+", "", reconstructed, flags=re.IGNORECASE)
+    # Strip decorative option letter prefixes if any e.g. "A. SELECT ...", preserving negative numbers
+    reconstructed = re.sub(r"^[A-P](?:[\.\:\)]|\s+-(?!\s*-?\d)|\s+)\s*", "", reconstructed, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", reconstructed).lower().strip()
+
+
 def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswer:
     """
-    Normalize an MCQ answer against a list of 2-6 options.
+    Normalize an MCQ answer against a list of 2-16 options.
     Accepts synthetic letter ('A', 'B', etc.), prefixed letter ('Option D: 2/36', 'B) 1/6'),
     full option text, or mathematically equivalent numeric/fraction values ('1/18' for '2/36').
     Returns NormalizedAnswer with canonical_key ('B'), selected_index (1), selected_text.
     """
     num_options = len(options)
-    if num_options < 2 or num_options > 6:
-        raise NormalizationError(f"MCQ requires between 2 and 6 options, got {num_options}")
+    if num_options < 2 or num_options > 16:
+        raise NormalizationError(f"MCQ requires between 2 and 16 options, got {num_options}")
 
-    valid_letters = list(SYNTHETIC_LABELS[:num_options])
+    valid_letters = list(EXTENDED_SYNTHETIC_LABELS[:num_options])
 
     # Convert raw_answer to string
     raw_str = str(raw_answer).strip()
@@ -292,9 +333,22 @@ def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswe
                     raw_answer=raw_answer,
                 )
 
+        # Step 2b: Code-Aware Normalization Match (for SQL, JavaScript, Python code snippets)
+        code_raw = normalize_code_snippet(raw_str)
+        if code_raw and len(code_raw) >= 4:
+            for i, opt in enumerate(options):
+                if normalize_code_snippet(opt) == code_raw:
+                    letter = chr(65 + i)
+                    return NormalizedAnswer(
+                        canonical_key=letter,
+                        selected_index=i,
+                        selected_text=options[i],
+                        raw_answer=raw_answer,
+                    )
+
     # Step 3: Explicit Label Prefix Extraction & Fallback
     # Check common prefixes: "Option A", "Option D: 2/36", "Choice B", "B) 1/6", "B. Mitochondrion", "(C)", "[A]"
-    wrapped_match = re.match(r"^(?:option|choice)?\s*\(?\[?([A-Fa-f])\)?\]?[\.\:\)]?$", clean_raw, re.IGNORECASE)
+    wrapped_match = re.match(r"^(?:option|choice)?\s*\(?\[?([A-Pa-p])\)?\]?[\.\:\)]?$", clean_raw, re.IGNORECASE)
     if wrapped_match:
         cand = wrapped_match.group(1).upper()
         if cand in valid_letters:
@@ -306,7 +360,7 @@ def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswe
                 raw_answer=raw_answer,
             )
 
-    prefix_match = re.match(r"^(?:option|choice)?\s*(?:\(?([A-Fa-f])[\.\)\:\-]\s*|\(([A-Fa-f])\)\s*|\[([A-Fa-f])\]\s*)(.*)$", clean_raw, re.IGNORECASE)
+    prefix_match = re.match(r"^(?:option|choice)?\s*(?:\(?([A-Pa-p])(?:[\.\)\:]|\s+-(?!\s*-?\d)|\s+)\s*|\(([A-Pa-p])\)\s*|\[([A-Pa-p])\]\s*)(.*)$", clean_raw, re.IGNORECASE)
     if prefix_match:
         cand = (prefix_match.group(1) or prefix_match.group(2) or prefix_match.group(3)).upper()
         if cand in valid_letters:
@@ -319,7 +373,7 @@ def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswe
             )
 
     # Numeric option prefixes: "Option 1", "Choice 2", "1", "(2)"
-    num_opt_match = re.match(r"^(?:option|choice)?\s*\(?\[?([1-6])\)?\]?[\.\:\)]?$", raw_str, re.IGNORECASE)
+    num_opt_match = re.match(r"^(?:option|choice)?\s*\(?\[?([1-9]|1[0-6])\)?\]?[\.\:\)]?$", raw_str, re.IGNORECASE)
     if num_opt_match:
         cand_num = int(num_opt_match.group(1))
         # Only treat as 1-based index if that digit is NOT an exact match for one of the options
@@ -334,7 +388,7 @@ def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswe
             )
 
     # Loose single letter match if isolated by word boundaries (e.g. "The answer is B")
-    loose_match = re.search(r"\b([A-Fa-f])\b", raw_str)
+    loose_match = re.search(r"\b([A-Pa-p])\b", raw_str)
     if loose_match:
         cand = loose_match.group(1).upper()
         if cand in valid_letters:
@@ -420,10 +474,10 @@ def normalize_order_answer(raw_answer: Any, options: List[str]) -> NormalizedAns
     Produces canonical_key ('B,D,A,C,E'), permutation_indices ([1, 3, 0, 2, 4]), and ordered_texts.
     """
     num_options = len(options)
-    if num_options < 2 or num_options > 8:
-        raise NormalizationError(f"Ordering requires between 2 and 8 options, got {num_options}")
+    if num_options < 2 or num_options > 16:
+        raise NormalizationError(f"Ordering requires between 2 and 16 options, got {num_options}")
 
-    expected_letters = list(ORDER_SYNTHETIC_LABELS[:num_options])
+    expected_letters = list(EXTENDED_SYNTHETIC_LABELS[:num_options])
     expected_set = set(expected_letters)
 
     letters: List[str] = []
@@ -449,22 +503,24 @@ def normalize_order_answer(raw_answer: Any, options: List[str]) -> NormalizedAns
         # 1C: Check if list contains full option strings
         if not letters:
             mapped_indices: List[int] = []
+            used_indices = set()
             for item in raw_answer:
                 item_norm = normalize_text_answer(str(item))
                 found_idx = None
                 for idx, opt in enumerate(options):
-                    if normalize_text_answer(opt) == item_norm:
+                    if idx not in used_indices and normalize_text_answer(opt) == item_norm:
                         found_idx = idx
                         break
                 if found_idx is None:
                     cand = [
                         idx for idx, opt in enumerate(options)
-                        if item_norm and (item_norm in normalize_text_answer(opt) or normalize_text_answer(opt) in item_norm)
+                        if idx not in used_indices and item_norm and (item_norm in normalize_text_answer(opt) or normalize_text_answer(opt) in item_norm)
                     ]
                     if len(cand) == 1:
                         found_idx = cand[0]
 
-                if found_idx is not None and found_idx not in mapped_indices:
+                if found_idx is not None and found_idx not in used_indices:
+                    used_indices.add(found_idx)
                     mapped_indices.append(found_idx)
                 else:
                     break
@@ -484,13 +540,13 @@ def normalize_order_answer(raw_answer: Any, options: List[str]) -> NormalizedAns
                 pass
 
         # 2A: Numbered list with letters: e.g. "1. B, 2. D, 3. A, 4. C, 5. E" or "Step 1: B, Step 2: D..."
-        numbered_matches = re.findall(r"(?:(?:step\s*\d+|\d+)[\.\:\-\s]+)?\b([A-Ha-h])\b", trimmed, re.I)
+        numbered_matches = re.findall(r"(?:(?:step\s*\d+|\d+)[\.\:\-\s]+)?\b([A-Pa-p])\b", trimmed, re.I)
         if len(numbered_matches) == num_options and set(c.upper() for c in numbered_matches) == expected_set:
             letters = [c.upper() for c in numbered_matches]
 
         # 2B: Letter sequence separated by arrows/dashes/spaces/commas e.g. "B -> D -> A -> C -> E", "B > D > A > C > E", "B - D - A - C - E"
         if not letters:
-            extracted_letters = re.findall(r"\b([A-Ha-h])\b", trimmed)
+            extracted_letters = re.findall(r"\b([A-Pa-p])\b", trimmed)
             if len(extracted_letters) == num_options and set(c.upper() for c in extracted_letters) == expected_set:
                 letters = [c.upper() for c in extracted_letters]
 
@@ -830,14 +886,14 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
     for item in items:
         item_str = item.strip()
         # 1. Single letter match: "A", "(A)", "Option A", "[A]"
-        letter_m = re.match(r"^(?:option|choice)?\s*\(?\[?([A-Fa-f])\)?\]?[\.\:\)]?$", item_str, re.IGNORECASE)
+        letter_m = re.match(r"^(?:option|choice)?\s*\(?\[?([A-Pa-p])\)?\]?[\.\:\)]?$", item_str, re.IGNORECASE)
         if letter_m:
             l_cand = letter_m.group(1).upper()
             if l_cand in valid_letters:
                 matched_indices.add(ord(l_cand) - 65)
                 continue
 
-        # 2. Text match against options
+        # 2. Text match against options (direct or with leading "B: " / "Option B: " stripped)
         norm_item = normalize_text_answer(item_str)
         found = False
         for idx, opt in enumerate(options):
@@ -848,15 +904,37 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
         if found:
             continue
 
-        # 3. Embedded letters in string (e.g. "Options A and D are correct")
-        letters = re.findall(r"\b([A-Fa-f])\b", item_str)
+        # 2b. Prefix + text match: e.g. "B: top = 0", "G) arr[0] = 10", "Option H - arr[0] = 10"
+        pref_m = re.match(
+            r"^(?:option|choice)?\s*(?:\(?([A-Pa-p])[\.\)\:]\s*|\(([A-Pa-p])\)\s*|\[([A-Pa-p])\]\s*)(.+)$",
+            item_str,
+            re.IGNORECASE,
+        )
+        if pref_m:
+            l_cand = (pref_m.group(1) or pref_m.group(2) or pref_m.group(3)).upper()
+            rest_text = pref_m.group(4).strip()
+            norm_rest = normalize_text_answer(rest_text)
+            for idx, opt in enumerate(options):
+                if opt.strip() == rest_text or normalize_text_answer(opt) == norm_rest:
+                    matched_indices.add(idx)
+                    found = True
+                    break
+            if not found and l_cand in valid_letters:
+                matched_indices.add(ord(l_cand) - 65)
+                found = True
+            if found:
+                continue
+
+        # 3. Embedded letters in short label strings (e.g. "Options A and D are correct")
+        # Never match lowercase article 'a' inside full prose sentences
+        letters = re.findall(r"(?:(?:option|choice)s?\s+)?\b([A-P])\b", item_str)
         for l in letters:
             if l.upper() in valid_letters:
                 matched_indices.add(ord(l.upper()) - 65)
 
     # Fallback: scan whole raw_answer string for letters
     if not matched_indices and isinstance(raw_answer, str):
-        letters = re.findall(r"\b([A-Fa-f])\b", raw_answer)
+        letters = re.findall(r"\b([A-Pa-p])\b", raw_answer)
         for l in letters:
             if l.upper() in valid_letters:
                 matched_indices.add(ord(l.upper()) - 65)
