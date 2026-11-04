@@ -1,24 +1,39 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QuizZy Observability Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23fbbf24'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
 </head>
+
 <body class="dark-theme">
   <div class="app-container">
     <!-- Top Global Header -->
     <header class="top-nav">
       <div class="brand-group">
         <div class="brand-logo">
-          <span class="logo-bolt">⚡</span>
+          <div class="brand-icon-box">
+            <svg class="brand-svg-bolt" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+          </div>
           <div class="brand-meta">
-            <h1 class="brand-title">QuizZy <span class="brand-sub">Observability</span></h1>
-            <span class="brand-tagline">Real-Time Backend Telemetry & Reliability</span>
+            <div class="brand-title-wrap">
+              <h1 class="brand-title">QuizZy <span class="brand-sub">Observability</span></h1>
+              <span class="brand-version-chip">v1.2</span>
+            </div>
+            <span class="brand-tagline">Real-Time Backend Telemetry & Reliability Engine</span>
           </div>
         </div>
+
         <!-- Backend Status Pill -->
         <div id="backend-status-pill" class="status-pill status-pill-loading">
           <span class="pulse-indicator"></span>
@@ -28,43 +43,72 @@
 
       <div class="controls-group">
         <!-- Model Selection Dropdown -->
-        <div class="model-selector" title="Select LLM model solver cascade">
-          <label for="model-select" class="control-label">Model:</label>
-          <select id="model-select" class="styled-select model-dropdown">
-            <option value="auto" selected>⚡ Auto (Intelligent Cascade)</option>
-            <optgroup label="Primary Profiles">
-              <option value="primary_a">Primary A (openai/gpt-oss-120b)</option>
-              <option value="primary_b">Primary B (qwen/qwen3.8-27b)</option>
-            </optgroup>
-            <optgroup label="Provider Modes">
-              <option value="groq_only">Groq Only (All Groq Cascade)</option>
-              <option value="openrouter_only">OpenRouter Only (All OpenRouter Cascade)</option>
-            </optgroup>
-            <optgroup label="Specific Groq Models">
-              <option value="groq:openai/gpt-oss-120b">Groq: openai/gpt-oss-120b</option>
-              <option value="groq:qwen/qwen3.8-27b">Groq: qwen/qwen3.8-27b</option>
-              <option value="groq:openai/gpt-oss-20b">Groq: openai/gpt-oss-20b</option>
-            </optgroup>
-            <optgroup label="Specific OpenRouter Models">
-              <option value="openrouter:nvidia/nemotron-3.5-super-vl:free">OpenRouter: nemotron-3.5-super-vl</option>
-              <option value="openrouter:nvidia/nemotron-3.5-lightning:free">OpenRouter: nemotron-3.5-lightning</option>
-              <option value="openrouter:google/gemma-4-31b-it:free">OpenRouter: gemma-4-31b-it</option>
-              <option value="openrouter:liquid/lfm-2.5-2.6b:free">OpenRouter: lfm-2.5-2.6b</option>
-              <option value="openrouter:nvidia/nemotron-3-ultra-550b-a55b:free">OpenRouter: nemotron-3-ultra-550b</option>
-              <option value="openrouter:nvidia/nemotron-3-super-120b-a12b:free">OpenRouter: nemotron-3-super-120b</option>
-              <option value="openrouter:google/gemma-4-26b-a4b-it:free">OpenRouter: gemma-4-26b-a4b-it</option>
-            </optgroup>
-          </select>
+        <div class="control-item model-selector" title="Select LLM model solver cascade">
+          <label for="model-select" class="control-label">
+            <svg class="control-label-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path
+                d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+            </svg>
+            Model
+          </label>
+          <div class="select-wrapper">
+            <select id="model-select" class="styled-select model-dropdown">
+              <option value="auto" selected>Auto (Intelligent Cascade)</option>
+              <optgroup label="Primary Profiles">
+                <option value="primary_a">Primary A (openai/gpt-oss-120b)</option>
+                <option value="primary_b">Primary B (qwen/qwen3.8-27b)</option>
+              </optgroup>
+              <optgroup label="Provider Modes">
+                <option value="groq_only">Groq Only (All Groq Cascade)</option>
+                <option value="openrouter_only">OpenRouter Only (All OpenRouter Cascade)</option>
+              </optgroup>
+              <optgroup label="Specific Groq Models">
+                <option value="groq:openai/gpt-oss-120b">Groq: openai/gpt-oss-120b</option>
+                <option value="groq:qwen/qwen3.8-27b">Groq: qwen/qwen3.8-27b</option>
+                <option value="groq:openai/gpt-oss-20b">Groq: openai/gpt-oss-20b</option>
+              </optgroup>
+              <optgroup label="Specific OpenRouter Models">
+                <option value="openrouter:nvidia/nemotron-3.5-super-vl:free">OpenRouter: nemotron-3.5-super-vl</option>
+                <option value="openrouter:nvidia/nemotron-3.5-lightning:free">OpenRouter: nemotron-3.5-lightning
+                </option>
+                <option value="openrouter:google/gemma-4-31b-it:free">OpenRouter: gemma-4-31b-it</option>
+                <option value="openrouter:liquid/lfm-2.5-2.6b:free">OpenRouter: lfm-2.5-2.6b</option>
+                <option value="openrouter:nvidia/nemotron-3-ultra-550b-a55b:free">OpenRouter: nemotron-3-ultra-550b
+                </option>
+                <option value="openrouter:nvidia/nemotron-3-super-120b-a12b:free">OpenRouter: nemotron-3-super-120b
+                </option>
+                <option value="openrouter:google/gemma-4-26b-a4b-it:free">OpenRouter: gemma-4-26b-a4b-it</option>
+              </optgroup>
+            </select>
+            <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
         </div>
 
         <!-- Time Window Filter -->
-        <div class="window-selector">
-          <label for="time-window" class="control-label">Window:</label>
-          <select id="time-window" class="styled-select">
-            <option value="all" selected>All Time</option>
-            <option value="24h">Last 24 Hours</option>
-            <option value="1h">Last 1 Hour</option>
-          </select>
+        <div class="control-item window-selector">
+          <label for="time-window" class="control-label">
+            <svg class="control-label-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            Window
+          </label>
+          <div class="select-wrapper">
+            <select id="time-window" class="styled-select">
+              <option value="all" selected>All Time</option>
+              <option value="24h">Last 24 Hours</option>
+              <option value="1h">Last 1 Hour</option>
+            </select>
+            <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
         </div>
 
         <!-- Auto-Refresh Toggle -->
@@ -76,15 +120,28 @@
           </label>
         </div>
 
-        <!-- Refresh Now Button -->
-        <button id="btn-refresh" class="btn btn-secondary" title="Force refresh telemetry">
-          <span class="btn-icon">🔄</span> Refresh
-        </button>
+        <div class="button-group">
+          <!-- Refresh Now Button -->
+          <button id="btn-refresh" class="btn btn-secondary" title="Force refresh telemetry">
+            <svg class="btn-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+            </svg>
+            <span>Refresh</span>
+          </button>
 
-        <!-- Clear Logs Button -->
-        <button id="btn-clear" class="btn btn-danger-outline" title="Clear recorded telemetry logs">
-          <span class="btn-icon">🗑️</span> Clear
-        </button>
+          <!-- Clear Logs Button -->
+          <button id="btn-clear" class="btn btn-danger-outline" title="Clear recorded telemetry logs">
+            <svg class="btn-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              <line x1="10" y1="11" x2="10" y2="17"></line>
+              <line x1="14" y1="11" x2="14" y2="17"></line>
+            </svg>
+            <span>Clear</span>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -94,7 +151,9 @@
         <!-- 1. Overall Performance -->
         <div class="kpi-card performance-card" id="card-perf">
           <div class="kpi-header">
-            <span class="kpi-title">Overall Performance</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Overall Performance</span>
+            </div>
             <span id="health-grade-badge" class="badge badge-grade">--</span>
           </div>
           <div class="kpi-value-row">
@@ -112,8 +171,17 @@
         <!-- 2. Total Requests -->
         <div class="kpi-card" id="card-requests">
           <div class="kpi-header">
-            <span class="kpi-title">Total Requests</span>
-            <span class="card-icon">📊</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Total Requests</span>
+            </div>
+            <div class="card-icon-box">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"></line>
+                <line x1="12" y1="20" x2="12" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="14"></line>
+              </svg>
+            </div>
           </div>
           <div class="kpi-value-row">
             <span id="total-requests" class="kpi-huge">0</span>
@@ -133,15 +201,24 @@
         <!-- 3. Success vs Error Rate -->
         <div class="kpi-card" id="card-rates">
           <div class="kpi-header">
-            <span class="kpi-title">Success vs. Error Rate</span>
-            <span class="card-icon">🎯</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Success vs. Error Rate</span>
+            </div>
+            <div class="card-icon-box">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <circle cx="12" cy="12" r="6"></circle>
+                <circle cx="12" cy="12" r="2"></circle>
+              </svg>
+            </div>
           </div>
           <div class="kpi-split-row">
             <div class="split-col">
               <span class="split-label text-success">Success Rate</span>
               <span id="success-rate" class="split-val text-success">100.0%</span>
             </div>
-            <div class="split-col">
+            <div class="split-col align-right">
               <span class="split-label text-danger">Error Rate</span>
               <span id="error-rate" class="split-val text-danger">0.0%</span>
             </div>
@@ -155,8 +232,16 @@
         <!-- 4. Accuracy (Strict Non-Hallucination) -->
         <div class="kpi-card" id="card-accuracy">
           <div class="kpi-header">
-            <span class="kpi-title">Strict Accuracy Rate</span>
-            <span class="badge badge-shield" title="Zero-Hallucination Option Validation">🛡️ Zero-Hallucination</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Strict Accuracy</span>
+            </div>
+            <span class="badge badge-shield" title="Zero-Hallucination Option Validation">
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              Zero-Hallucination
+            </span>
           </div>
           <div class="kpi-value-row">
             <span id="accuracy-rate" class="kpi-huge text-emerald">100.0%</span>
@@ -172,8 +257,16 @@
         <!-- 5. Latency Metrics -->
         <div class="kpi-card" id="card-latency">
           <div class="kpi-header">
-            <span class="kpi-title">Average Latency</span>
-            <span class="card-icon">⚡</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Average Latency</span>
+            </div>
+            <div class="card-icon-box">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 14 14"></polyline>
+              </svg>
+            </div>
           </div>
           <div class="kpi-value-row">
             <span id="avg-latency" class="kpi-huge text-cyan">0</span>
@@ -189,16 +282,27 @@
         <!-- 6. Backend Status Card -->
         <div class="kpi-card" id="card-backend">
           <div class="kpi-header">
-            <span class="kpi-title">Backend Status</span>
-            <span class="card-icon">🖥️</span>
+            <div class="kpi-title-wrap">
+              <span class="kpi-title">Backend Status</span>
+            </div>
+            <div class="card-icon-box">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                <line x1="6" y1="18" x2="6.01" y2="18"></line>
+              </svg>
+            </div>
           </div>
           <div class="kpi-value-row">
             <span id="backend-status-card-label" class="kpi-huge status-label-pill">--</span>
           </div>
           <div class="backend-details-sub">
-            <div>Port: <strong>8000</strong> (<span id="backend-ping-ms">-- ms</span>)</div>
-            <div>Model: <strong id="backend-active-model-badge">Auto</strong></div>
-            <div>Uptime: <strong id="backend-uptime">--</strong></div>
+            <div class="detail-row"><span>Port:</span> <strong>8000 (<span id="backend-ping-ms">-- ms</span>)</strong>
+            </div>
+            <div class="detail-row"><span>Model:</span> <strong id="backend-active-model-badge">Auto</strong></div>
+            <div class="detail-row"><span>Uptime:</span> <strong id="backend-uptime">--</strong></div>
           </div>
         </div>
       </section>
@@ -209,10 +313,19 @@
         <div class="panel-card error-breakdown-panel">
           <div class="panel-header">
             <div class="panel-title-group">
-              <span class="panel-icon">⚠️</span>
-              <h2 class="panel-title">Deterministic Error Breakdown</h2>
+              <div class="panel-icon-box panel-icon-warning">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </div>
+              <div>
+                <h2 class="panel-title">Deterministic Error Breakdown</h2>
+                <span class="panel-caption">Automated fault classification across all solve attempts</span>
+              </div>
             </div>
-            <span class="panel-caption">Automated fault classification across all solve attempts</span>
           </div>
           <div id="error-breakdown-list" class="error-breakdown-container">
             <!-- Dynamic Error Bars injected here -->
@@ -223,8 +336,17 @@
         <div class="panel-card timeline-panel">
           <div class="panel-header">
             <div class="panel-title-group">
-              <span class="panel-icon">📈</span>
-              <h2 class="panel-title">Recent Request Stream (Last 50)</h2>
+              <div class="panel-icon-box panel-icon-chart">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+                  <polyline points="17 6 23 6 23 12"></polyline>
+                </svg>
+              </div>
+              <div>
+                <h2 class="panel-title">Recent Request Stream (Last 50)</h2>
+                <span class="panel-caption">Latency distribution & outcome classification</span>
+              </div>
             </div>
             <div class="legend-group">
               <span class="legend-item"><span class="legend-dot bg-emerald"></span> Accurate</span>
@@ -242,38 +364,67 @@
       <section class="table-section">
         <div class="table-toolbar">
           <div class="toolbar-title-group">
-            <span class="panel-icon">🔍</span>
-            <h2 class="panel-title">Request Telemetry Logs</h2>
-            <span id="logs-count-badge" class="badge badge-counter">0 logs</span>
+            <div class="panel-icon-box panel-icon-table">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6"></line>
+                <line x1="8" y1="12" x2="21" y2="12"></line>
+                <line x1="8" y1="18" x2="21" y2="18"></line>
+                <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                <line x1="3" y1="18" x2="3.01" y2="18"></line>
+              </svg>
+            </div>
+            <div class="toolbar-heading-wrap">
+              <h2 class="panel-title">Request Telemetry Logs</h2>
+              <span id="logs-count-badge" class="badge badge-counter">0 logs</span>
+            </div>
           </div>
 
           <div class="toolbar-filters">
             <!-- Search -->
             <div class="search-input-wrapper">
-              <span class="search-icon">🔎</span>
-              <input type="text" id="search-input" placeholder="Search questions, answers, models..." class="search-input">
+              <svg class="search-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="text" id="search-input" placeholder="Search questions, answers, models..."
+                class="search-input">
             </div>
 
             <!-- Status Filter -->
-            <select id="filter-status" class="styled-select filter-select">
-              <option value="">Status: All</option>
-              <option value="SUCCESS">Success Only</option>
-              <option value="FAILURE">Failure Only</option>
-            </select>
+            <div class="select-wrapper">
+              <select id="filter-status" class="styled-select filter-select">
+                <option value="">Status: All</option>
+                <option value="SUCCESS">Success Only</option>
+                <option value="FAILURE">Failure Only</option>
+              </select>
+              <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </div>
 
             <!-- Error Type Filter -->
-            <select id="filter-error-type" class="styled-select filter-select">
-              <option value="">Error Type: All</option>
-              <option value="NONE">NONE (Valid Answer)</option>
-              <option value="HALLUCINATED_OPTION">HALLUCINATED_OPTION</option>
-              <option value="EMPTY_ANSWER">EMPTY_ANSWER</option>
-              <option value="LLM_TIMEOUT">LLM_TIMEOUT</option>
-              <option value="RATE_LIMIT_429">RATE_LIMIT_429</option>
-              <option value="SCHEMA_PARSE_ERROR">SCHEMA_PARSE_ERROR</option>
-              <option value="VALIDATION_ERROR">VALIDATION_ERROR</option>
-              <option value="PROVIDER_API_ERROR">PROVIDER_API_ERROR</option>
-              <option value="INTERNAL_SERVER_ERROR">INTERNAL_SERVER_ERROR</option>
-            </select>
+            <div class="select-wrapper">
+              <select id="filter-error-type" class="styled-select filter-select">
+                <option value="">Error Type: All</option>
+                <option value="NONE">NONE (Valid Answer)</option>
+                <option value="HALLUCINATED_OPTION">HALLUCINATED_OPTION</option>
+                <option value="EMPTY_ANSWER">EMPTY_ANSWER</option>
+                <option value="LLM_TIMEOUT">LLM_TIMEOUT</option>
+                <option value="RATE_LIMIT_429">RATE_LIMIT_429</option>
+                <option value="SCHEMA_PARSE_ERROR">SCHEMA_PARSE_ERROR</option>
+                <option value="VALIDATION_ERROR">VALIDATION_ERROR</option>
+                <option value="PROVIDER_API_ERROR">PROVIDER_API_ERROR</option>
+                <option value="INTERNAL_SERVER_ERROR">INTERNAL_SERVER_ERROR</option>
+              </select>
+              <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </div>
           </div>
         </div>
 
@@ -281,16 +432,16 @@
           <table class="telemetry-table" id="telemetry-table">
             <thead>
               <tr>
-                <th style="width: 60px">ID</th>
-                <th style="width: 90px">Time</th>
+                <th style="width: 70px">ID</th>
+                <th style="width: 95px">Time</th>
                 <th style="width: 80px">Type</th>
                 <th>Question Snippet</th>
                 <th>Selected Answer</th>
                 <th style="width: 110px">Accuracy</th>
-                <th style="width: 90px">Status</th>
-                <th style="width: 170px">Error Type</th>
-                <th style="width: 90px">Latency</th>
-                <th style="width: 130px">Model / Cache</th>
+                <th style="width: 95px">Status</th>
+                <th style="width: 175px">Error Type</th>
+                <th style="width: 95px">Latency</th>
+                <th style="width: 135px">Model / Cache</th>
               </tr>
             </thead>
             <tbody id="telemetry-tbody">
@@ -311,7 +462,13 @@
             <span class="modal-badge-id" id="modal-req-id">REQ #--</span>
             <h3 class="modal-title">Request Inspection Details</h3>
           </div>
-          <button id="modal-close-btn" class="modal-close" title="Close inspector (ESC)">&times;</button>
+          <button id="modal-close-btn" class="modal-close" title="Close inspector (ESC)" aria-label="Close modal">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
         </div>
 
         <div class="modal-body" id="modal-content">
@@ -327,5 +484,5 @@
 
   <script src="/static/dashboard.js"></script>
 </body>
-</html>
 
+</html>

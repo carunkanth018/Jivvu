@@ -12,14 +12,14 @@
 
 const BACKEND_BASE_URL = "http://127.0.0.1:8000";
 
-// In-flight solve deduplication and 10s 429 rate limit cooldown tracking
+// In-flight solve deduplication and 2.5s 429 rate limit cooldown tracking
 const _bgInFlightSolves = new Map();
 const _bgRecent429Signatures = new Map();
 
 function recordRecent429Signature(qSig) {
   const now = Date.now();
   for (const [key, ts] of _bgRecent429Signatures.entries()) {
-    if (now - ts > 10000) _bgRecent429Signatures.delete(key);
+    if (now - ts > 2500) _bgRecent429Signatures.delete(key);
   }
   if (_bgRecent429Signatures.size >= 50) {
     const oldest = _bgRecent429Signatures.keys().next().value;
@@ -50,9 +50,11 @@ function decodePotentialUrl(rawUrl) {
 // Authoritative client-side validation guard to prevent dispatching invalid payloads to backend
 function isValidExtractedQuestion(q) {
   if (!q) return false;
-  const stem = (q.stem || q.question_text || q.question || "").trim();
+  const stem = (q.stem || q.question_text || q.question || ((q.starter_code || q.image_data || q.image_url) ? "Solve the given problem based on the provided code or diagram." : "")).trim();
   if (stem.length < 2) return false;
-  const type = (q.q_type || "mcq").toLowerCase();
+  const rawType = (q.q_type || "mcq").toLowerCase();
+  const typeMap = { mcq: "mcq", multiple: "multi", multi: "multi", ordering: "order", order: "order", fill: "text", text: "text", coding: "code", code: "code" };
+  const type = typeMap[rawType] || rawType;
   if (["mcq", "multi", "order"].includes(type)) {
     const validOpts = Array.isArray(q.options)
       ? q.options.filter(o => o !== null && o !== undefined && (typeof o === "string" ? o.trim().length >= 1 : (typeof o === "object" ? String(o.text || o.label || o.value || "").trim().length >= 1 : String(o).trim().length >= 1)))
@@ -68,7 +70,7 @@ async function resolveTargetTab(message, sender) {
     try {
       const tab = await chrome.tabs.get(message.tabId);
       if (tab) return tab;
-    } catch (_) {}
+    } catch (_) { }
   }
   if (sender && sender.tab && sender.tab.id) {
     return sender.tab;
@@ -118,7 +120,7 @@ async function ensureScriptInjected(tabId, checkGlobal, fileName) {
       trackInjectedTabScript(tabId, fileName);
       return true;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     await chrome.scripting.executeScript({
@@ -130,6 +132,53 @@ async function ensureScriptInjected(tabId, checkGlobal, fileName) {
     return true;
   } catch (err) {
     return false;
+  }
+}
+
+// Safe messaging wrappers that check chrome.runtime.lastError to eliminate Unchecked runtime.lastError logs in Chrome
+function safeSendMessageToTab(tabId, message, callback) {
+  if (!tabId || typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.sendMessage) {
+    if (typeof callback === "function") callback(null, new Error("Invalid tabId or tabs API missing"));
+    return;
+  }
+  try {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      const err = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError : null;
+      if (typeof callback === "function") {
+        try {
+          callback(response, err);
+        } catch (_) { }
+      }
+    });
+  } catch (syncErr) {
+    if (typeof callback === "function") {
+      try {
+        callback(null, syncErr);
+      } catch (_) { }
+    }
+  }
+}
+
+function safeSendMessageToRuntime(message, callback) {
+  if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+    if (typeof callback === "function") callback(null, new Error("Runtime API missing"));
+    return;
+  }
+  try {
+    chrome.runtime.sendMessage(message, (response) => {
+      const err = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError : null;
+      if (typeof callback === "function") {
+        try {
+          callback(response, err);
+        } catch (_) { }
+      }
+    });
+  } catch (syncErr) {
+    if (typeof callback === "function") {
+      try {
+        callback(null, syncErr);
+      } catch (_) { }
+    }
   }
 }
 
@@ -153,11 +202,11 @@ async function injectAndToggleFloatingHud(tabId, shouldToggle = true, autoShow =
     }
 
     if (shouldToggle && hudResult && hudResult.alreadyMounted) {
-      chrome.tabs.sendMessage(tabId, { action: "TOGGLE_FLOATING_HUD_COMMAND" }).catch(() => {});
+      safeSendMessageToTab(tabId, { action: "TOGGLE_FLOATING_HUD_COMMAND" });
     } else if (autoShow) {
-      chrome.tabs.sendMessage(tabId, { action: "SHOW_FLOATING_HUD_COMMAND" }).catch(() => {});
+      safeSendMessageToTab(tabId, { action: "SHOW_FLOATING_HUD_COMMAND" });
     } else {
-      chrome.tabs.sendMessage(tabId, { action: "HIDE_FLOATING_HUD_COMMAND" }).catch(() => {});
+      safeSendMessageToTab(tabId, { action: "HIDE_FLOATING_HUD_COMMAND" }); // chrome.tabs.sendMessage(tabId, { action: "HIDE_FLOATING_HUD_COMMAND" })
     }
 
     return hudResult;
@@ -217,7 +266,7 @@ function injectIntoOpenTabs() {
               }
             });
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     });
   }
@@ -258,8 +307,11 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onConnect)
           if (!tabs || !Array.isArray(tabs)) return;
           for (const t of tabs) {
             if (t && t.id) {
-              chrome.tabs.sendMessage(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: true }).catch(() => {});
-              chrome.tabs.sendMessage(t.id, { action: "HIDE_FLOATING_HUD_COMMAND" }).catch(() => {});
+              const hasScript = (typeof injectedTabScripts !== "undefined" && injectedTabScripts.has(t.id)) || (t.url && isCcbpUrl(t.url));
+              if (hasScript) {
+                safeSendMessageToTab(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: true });
+                safeSendMessageToTab(t.id, { action: "HIDE_FLOATING_HUD_COMMAND" });
+              }
             }
           }
         });
@@ -271,7 +323,10 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onConnect)
             if (!tabs || !Array.isArray(tabs)) return;
             for (const t of tabs) {
               if (t && t.id) {
-                chrome.tabs.sendMessage(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: false }).catch(() => {});
+                const hasScript = (typeof injectedTabScripts !== "undefined" && injectedTabScripts.has(t.id)) || (t.url && isCcbpUrl(t.url));
+                if (hasScript) {
+                  safeSendMessageToTab(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: false });
+                }
               }
             }
           });
@@ -298,11 +353,11 @@ if (typeof chrome !== "undefined" && chrome.windows) {
         if (!windows || !Array.isArray(windows)) return;
         for (const win of windows) {
           if (win && win.type === "popup" && win.tabs && win.tabs.some(t => t.url && t.url.includes("sidepanel.html?mode=popup"))) {
-            chrome.windows.remove(win.id).catch(() => {});
+            chrome.windows.remove(win.id).catch(() => { });
           }
         }
       });
-    } catch (_) {}
+    } catch (_) { }
   }
 }
 
@@ -336,7 +391,7 @@ function updateActionBadge(text, color, tabId) {
         chrome.action.setBadgeBackgroundColor(bgDetails);
       }
     }
-  } catch (_) {}
+  } catch (_) { }
 }
 
 // ==========================================================================
@@ -356,6 +411,7 @@ const STOP_DEBOUNCE_ALARM_NAME = "quizzy_stop_debounce";
 let ccbpShutdownTimer = null;
 let isStartingBackendAuto = false;
 let isStoppingBackendAuto = false;
+let isBackendRunning = false;
 
 function isCcbpUrl(url) {
   if (!url || typeof url !== "string") return false;
@@ -433,6 +489,7 @@ async function startBackendDualChannel(reason = "ccbp_auto") {
       const data = await resp.json();
       console.log("[QuizZy Lifecycle] Backend started silently via Daemon API:", data);
       isStartingBackendAuto = false;
+      isBackendRunning = true;
       return data;
     }
   } catch (err) {
@@ -443,6 +500,7 @@ async function startBackendDualChannel(reason = "ccbp_auto") {
   return new Promise((resolve) => {
     sendNativeMessageWithFallback({ action: "START_BACKEND", source: `extension:${reason}` }, (res) => {
       isStartingBackendAuto = false;
+      isBackendRunning = Boolean(res && res.success !== false);
       console.log("[QuizZy Lifecycle] Backend started via Native Host fallback:", res);
       resolve(res);
     });
@@ -456,7 +514,7 @@ async function stopBackendDualChannel(reason = "ccbp_tabs_closed") {
   console.log(`[QuizZy Lifecycle] Stopping backend (reason: ${reason})...`);
 
   // Direct graceful /shutdown attempt on port 8000
-  fetch(`${BACKEND_BASE_URL}/shutdown`, { method: "POST" }).catch(() => {});
+  fetch(`${BACKEND_BASE_URL}/shutdown`, { method: "POST" }).catch(() => { });
 
   // 1. Try Channel A: Silent HTTP Daemon on 8765 FIRST
   let stoppedViaHttp = false;
@@ -483,6 +541,7 @@ async function stopBackendDualChannel(reason = "ccbp_tabs_closed") {
   }
 
   isStoppingBackendAuto = false;
+  isBackendRunning = false;
 }
 
 // Heartbeat sender: sends active tab count to Channel A, with Channel B fallback
@@ -503,7 +562,7 @@ function ensureBackendRunningForCcbp(reason) {
     ccbpShutdownTimer = null;
   }
   if (typeof chrome !== "undefined" && chrome.alarms) {
-    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => { });
   }
 
   // Ensure periodic heartbeat alarm is running (Chrome MV3 requires periodInMinutes >= 1)
@@ -519,12 +578,15 @@ function ensureBackendRunningForCcbp(reason) {
   fetch(`${BACKEND_BASE_URL}/health`, { cache: "no-store" })
     .then((res) => {
       if (res.ok) {
+        isBackendRunning = true;
         sendLifecycleHeartbeat(1);
         return;
       }
+      isBackendRunning = false;
       startBackendDualChannel(reason);
     })
     .catch(() => {
+      isBackendRunning = false;
       startBackendDualChannel(reason);
     });
 }
@@ -535,8 +597,8 @@ function ensureBackendStoppedForCcbp(immediate = false) {
     ccbpShutdownTimer = null;
   }
   if (typeof chrome !== "undefined" && chrome.alarms) {
-    chrome.alarms.clear(HEARTBEAT_ALARM_NAME).catch(() => {});
-    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+    chrome.alarms.clear(HEARTBEAT_ALARM_NAME).catch(() => { });
+    chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => { });
   }
 
   const performStop = () => {
@@ -599,7 +661,7 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
           target: { tabId },
           world: "ISOLATED",
           files: ["ccbp_lifecycle_bridge.js", "portal_completion.js"]
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       try {
@@ -616,7 +678,7 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
             }
           });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
   });
 }
@@ -661,16 +723,18 @@ if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved)
 if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
   chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details && details.tabId && details.url) {
-      // Broadcast route change message to active tab contexts so timers/controllers can abort cleanly
-      chrome.tabs.sendMessage(details.tabId, {
-        action: "QUIZZY_ROUTE_CHANGED",
-        url: details.url
-      }).catch(() => {});
+      if (isCcbpUrl(details.url) || (typeof injectedTabScripts !== "undefined" && injectedTabScripts.has(details.tabId))) {
+        // Broadcast route change message to active tab contexts so timers/controllers can abort cleanly
+        safeSendMessageToTab(details.tabId, {
+          action: "QUIZZY_ROUTE_CHANGED",
+          url: details.url
+        });
+      }
 
       if (isCcbpUrl(details.url)) {
         syncCcbpBackendLifecycle("webNavigation.onHistoryStateUpdated");
-        ensureScriptInjected(details.tabId, "__QUIZZY_CCBP_LIFECYCLE_BRIDGE__", "ccbp_lifecycle_bridge.js").catch(() => {});
-        ensureScriptInjected(details.tabId, "__QUIZZY_PORTAL_LOADED__", "portal_completion.js").catch(() => {});
+        ensureScriptInjected(details.tabId, "__QUIZZY_CCBP_LIFECYCLE_BRIDGE__", "ccbp_lifecycle_bridge.js").catch(() => { });
+        ensureScriptInjected(details.tabId, "__QUIZZY_PORTAL_LOADED__", "portal_completion.js").catch(() => { });
       }
       try {
         const urlObj = new URL(details.url);
@@ -686,7 +750,7 @@ if (typeof chrome !== "undefined" && chrome.webNavigation && chrome.webNavigatio
             }
           });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
   });
 }
@@ -755,9 +819,9 @@ async function handleUnifiedCommand(command, targetTab) {
   // 0. If side panel is open, all shortcuts route to the side panel!
   if (isSidePanelOpen) {
     try {
-      chrome.runtime.sendMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command }).catch(() => {});
+      safeSendMessageToRuntime({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command });
       return { success: true, forwarded_to_sidepanel: true };
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // 1. Try sending the shortcut action directly to the tab (handled by floating_hud.js)
@@ -775,7 +839,7 @@ async function handleUnifiedCommand(command, targetTab) {
     if (tabRes && (tabRes.handled || tabRes.success)) {
       return tabRes;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // 2. Check if this is a dedicated proctored coding route
   const isCoding = tabUrl.includes("/question/") || tabUrl.includes("/coding/");
@@ -1147,7 +1211,7 @@ async function handleTriggerAutoLoop(message, targetTab) {
           starter_code: effectiveStarter
         }]
       });
-    } catch (_) {}
+    } catch (_) { }
 
     const loopRes = await chrome.scripting.executeScript({
       target: { tabId: tabId },
@@ -1231,10 +1295,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const action = message.action || message.type;
 
+  if (action === "QUIZZY_SOFT_REFRESH_EXTENSION" || message.type === "QUIZZY_SOFT_REFRESH_EXTENSION") {
+    _bgInFlightSolves.clear();
+    _bgRecent429Signatures.clear();
+
+    const targetTabId = (sender && sender.tab && sender.tab.id) || message.tabId;
+    if (targetTabId && typeof injectedTabScripts !== "undefined" && injectedTabScripts.has(targetTabId)) {
+      injectedTabScripts.delete(targetTabId);
+    }
+
+    try {
+      fetch("http://127.0.0.1:8000/api/reset-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      }).catch(() => { });
+    } catch (_) { }
+
+    try {
+      safeSendMessageToRuntime({ type: "QUIZZY_TRIM_SIDEPANEL_LOGS", maxEntries: 15 });
+    } catch (_) { }
+
+    sendResponse({ success: true, refreshed: true });
+    return false;
+  }
+
   if (action === "QUIZZY_PERFORM_SOFT_RECYCLE" || action === "QUIZZY_RESET_QUESTION_STATE" || message.type === "QUIZZY_PERFORM_SOFT_RECYCLE") {
     const now = Date.now();
     for (const [key, ts] of _bgRecent429Signatures.entries()) {
-      if (now - ts > 10000) _bgRecent429Signatures.delete(key);
+      if (now - ts > 2500) _bgRecent429Signatures.delete(key);
     }
     while (_bgRecent429Signatures.size > 20) {
       const oldest = _bgRecent429Signatures.keys().next().value;
@@ -1245,10 +1333,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     _bgInFlightSolves.clear();
 
     try {
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ type: "QUIZZY_TRIM_SIDEPANEL_LOGS", maxEntries: 15 }).catch(() => {});
-      }
-    } catch (_) {}
+      safeSendMessageToRuntime({ type: "QUIZZY_TRIM_SIDEPANEL_LOGS", maxEntries: 15 });
+    } catch (_) { }
 
     sendResponse({ success: true, recycled: true });
     return false;
@@ -1261,7 +1347,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ccbpShutdownTimer = null;
     }
     if (typeof chrome !== "undefined" && chrome.alarms) {
-      chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => {});
+      chrome.alarms.clear(STOP_DEBOUNCE_ALARM_NAME).catch(() => { });
     }
     sendLifecycleHeartbeat(1);
     ensureBackendRunningForCcbp(action === "CCBP_PAGE_HEARTBEAT" ? "content_script_heartbeat" : "message:CCBP_PAGE_ACTIVE");
@@ -1287,9 +1373,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               window.QuizZyExecutor.abortCodingAutomation();
             }
           }
-        }).catch(() => {});
+        }).catch(() => { });
       }
-    }).catch(() => {});
+    }).catch(() => { });
     const targetTabId = (sender && sender.tab) ? sender.tab.id : undefined;
     updateActionBadge("", "", targetTabId);
     sendResponse({ success: true, stopped: true });
@@ -1301,9 +1387,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (action === "CLOSE_SIDEPANEL") {
     isSidePanelOpen = false;
-    chrome.runtime.sendMessage({ action: "CLOSE_SIDEPANEL_COMMAND" }).catch(() => {});
+    safeSendMessageToRuntime({ action: "CLOSE_SIDEPANEL_COMMAND" });
     if (activePopupWindowId && chrome.windows && chrome.windows.remove) {
-      chrome.windows.remove(activePopupWindowId).catch(() => {});
+      chrome.windows.remove(activePopupWindowId).catch(() => { });
       activePopupWindowId = null;
     }
     if (chrome.tabs && chrome.tabs.query) {
@@ -1311,7 +1397,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!tabs || !Array.isArray(tabs)) return;
         for (const t of tabs) {
           if (t && t.id) {
-            chrome.tabs.sendMessage(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: false }).catch(() => {});
+            const hasScript = (typeof injectedTabScripts !== "undefined" && injectedTabScripts.has(t.id)) || (t.url && isCcbpUrl(t.url));
+            if (hasScript) {
+              safeSendMessageToTab(t.id, { action: "SIDEPANEL_STATE_CHANGED", isOpen: false });
+            }
           }
         }
       });
@@ -1320,12 +1409,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (action === "FORWARD_SHORTCUT_TO_SIDEPANEL") {
-    chrome.runtime.sendMessage({
+    safeSendMessageToRuntime({
       action: "FORWARD_SHORTCUT_TO_SIDEPANEL",
       command: message.command,
       key: message.key,
       code: message.code
-    }).catch(() => {});
+    });
     sendResponse({ success: true, forwarded: true });
     return false;
   }
@@ -1337,8 +1426,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
-      .then((data) => sendResponse({ success: true, data }))
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .then((data) => {
+        isBackendRunning = true;
+        sendResponse({ success: true, data });
+      })
+      .catch((err) => {
+        isBackendRunning = false;
+        sendResponse({ success: false, error: err.message });
+      });
     return true; // asynchronous response
   }
 
@@ -1392,11 +1487,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // 10s Rate Limit Cooldown Guard
     const last429 = _bgRecent429Signatures.get(qSig);
-    if (last429 && (Date.now() - last429 < 10000)) {
+    if (last429 && (Date.now() - last429 < 2500)) {
       sendResponse({
         success: false,
         status: 429,
-        error: "Rate limit cooldown active (waiting 10s before retry)"
+        error: "Rate limit cooldown active (waiting 2.5s before retry)"
       });
       return false;
     }
@@ -1416,7 +1511,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         recordRecent429Signature(qSig);
       }
       for (const cb of callbacks) {
-        try { cb(resObj); } catch (_) {}
+        try { cb(resObj); } catch (_) { }
       }
     };
 
@@ -1495,7 +1590,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               return extracted;
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // 3. Visible Tab Crop Fallback (100% Guarantee for canvas, svg, blob, or failed fetch)
@@ -1510,7 +1605,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             try {
               const tInfo = await new Promise(r => chrome.tabs.get(tabId, r));
               if (tInfo && tInfo.windowId) targetWindowId = tInfo.windowId;
-            } catch (_) {}
+            } catch (_) { }
           } else if (tabId && typeof tabId === "object" && tabId.windowId) {
             targetWindowId = tabId.windowId;
           }
@@ -1557,11 +1652,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     return extracted;
                   }
                 }
-              } catch (_) {}
+              } catch (_) { }
             }
             extracted.image_data = dataUrl;
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       return extracted;
@@ -1612,7 +1707,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let extractionResult = null;
 
         const hasCustomParams = (message.customSelectors && Object.keys(message.customSelectors).length > 0) ||
-                                (message.forcedQType && message.forcedQType !== "auto");
+          (message.forcedQType && message.forcedQType !== "auto");
 
         if (!extractionResult || hasCustomParams) {
           const executionResults = await chrome.scripting.executeScript({
@@ -1935,10 +2030,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, windowId: activePopupWindowId });
         });
       }
+      return true;
     } else {
       sendResponse({ success: false, error: "chrome.windows.create not available" });
+      return false;
     }
-    return true;
   }
 
   // 11. Zero-Tag MAIN World Bridge: Read Full Starter Code & Language from Monaco/Ace
@@ -2025,6 +2121,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // 13b. Zero-Tag MAIN World Bridge: React Multi-Select Checkbox Execution
+  if (action === "QUIZZY_MAIN_WORLD_MULTI_SELECT" || action === "EXECUTE_REACT_MULTI_SELECT_MAIN") {
+    resolveTargetTab(message, sender).then(async (targetTab) => {
+      if (!targetTab || !targetTab.id) {
+        sendResponse({ success: false, ok: false, error: "No target tab found." });
+        return;
+      }
+      try {
+        const payload = message.payload || message;
+        const targetIndices = payload.targetIndices || payload.selected_indices || [];
+        const targetTexts = payload.targetTexts || payload.selected_texts || [];
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: targetTab.id },
+          world: "MAIN",
+          func: selectMultiOptionsInMainWorld,
+          args: [targetIndices, targetTexts]
+        });
+
+        sendResponse(results && results[0] ? results[0].result : { success: false, ok: false, error: "No result" });
+      } catch (err) {
+        sendResponse({ success: false, ok: false, error: err.message });
+      }
+    }).catch((err) => {
+      sendResponse({ success: false, ok: false, error: err.message });
+    });
+    return true;
+  }
+
 
   // 14b. Get Current Coding Automation State
   if (action === "GET_CODING_AUTOMATION_STATE") {
@@ -2092,7 +2216,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "TRIGGER_AUTO" || action === "TRIGGER_AUTO_MODE") {
     resolveTargetTab(message, sender).then(async (targetTab) => {
       if (isSidePanelOpen) {
-        chrome.runtime.sendMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_auto" }).catch(() => {});
+        safeSendMessageToRuntime({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_auto" });
         sendResponse({ success: true, forwarded_to_sidepanel: true });
         return;
       }
@@ -2119,7 +2243,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               world: "ISOLATED",
               files: ["portal_completion.js"]
             });
-          } catch (_) {}
+          } catch (_) { }
         }
         chrome.tabs.sendMessage(targetTab.id, { action: "PORTAL_COMPLETION_TOGGLE" }, (res) => {
           sendResponse(res || { success: true });
@@ -2134,7 +2258,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (action === "PORTAL_COMPLETION_STATE_CHANGED") {
     if (sender && sender.tab && sender.tab.id) {
-      chrome.tabs.sendMessage(sender.tab.id, { action: "PORTAL_COMPLETION_STATE_CHANGED", active: Boolean(message.active) }).catch(() => {});
+      safeSendMessageToTab(sender.tab.id, { action: "PORTAL_COMPLETION_STATE_CHANGED", active: Boolean(message.active) });
     }
     sendResponse({ success: true, active: Boolean(message.active) });
     return false;
@@ -2184,12 +2308,12 @@ function reorderReactListInMainWorld(payload) {
         if (clone && typeof clone.querySelectorAll === "function") {
           const hiddenMath = clone.querySelectorAll(".katex-mathml, .MJX_Assistive_MathML, math, annotation, script, style, svg");
           for (const hm of hiddenMath) {
-            try { hm.remove(); } catch (_) {}
+            try { hm.remove(); } catch (_) { }
           }
           return cleanStr(clone.textContent || clone.innerText || "");
         }
       }
-    } catch (_) {}
+    } catch (_) { }
     return cleanStr(el.innerText || el.textContent || "");
   }
 
@@ -2200,7 +2324,7 @@ function reorderReactListInMainWorld(payload) {
       try {
         const el = document.querySelector(sel);
         if (el && !rows.includes(el)) rows.push(el);
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 
@@ -2221,7 +2345,7 @@ function reorderReactListInMainWorld(payload) {
           rows = matched.slice(0, N);
           break;
         }
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 
@@ -2285,7 +2409,7 @@ function reorderReactListInMainWorld(payload) {
         const ct = currentTexts[idx];
         const ctAlnum = ct.replace(/[^a-z0-9]/g, "");
         return (ct && tgt && (ct.includes(tgt) || tgt.includes(ct))) ||
-               (ctAlnum && tgtAlnum && (ctAlnum === tgtAlnum || ctAlnum.includes(tgtAlnum) || tgtAlnum.includes(ctAlnum)));
+          (ctAlnum && tgtAlnum && (ctAlnum === tgtAlnum || ctAlnum.includes(tgtAlnum) || tgtAlnum.includes(ctAlnum)));
       });
     }
     if (foundIdx === -1 && Array.isArray(payload.options) && payload.options.length === N) {
@@ -2389,7 +2513,7 @@ function reorderReactListInMainWorld(payload) {
                   active: { id: activeDraggableId, data: { current: { sortable: { index: currentPos } } } },
                   over: { id: draggableIds[simulatedList[targetPos]], data: { current: { sortable: { index: targetPos } } } }
                 });
-              } catch (_) {}
+              } catch (_) { }
 
               const [moved] = simulatedList.splice(currentPos, 1);
               simulatedList.splice(targetPos, 0, moved);
@@ -2472,6 +2596,116 @@ function reorderReactListInMainWorld(payload) {
   }
 
   return { success: false, error: "React Fiber tree walked but no suitable dnd handlers or state arrays found" };
+}
+
+// MAIN-World React Multi-Select Checkbox Fallback (Zero-Tag MAIN World Bridge)
+function selectMultiOptionsInMainWorld(targetIndices, targetTexts) {
+  const win = typeof window !== "undefined" ? window : null;
+  const doc = typeof document !== "undefined" ? document : null;
+  if (!doc) return { success: false, ok: false, error: "No document available" };
+
+  let optionRows = [];
+  if (win && win.QuizZyExtractor && typeof win.QuizZyExtractor.getLastOptionElements === "function") {
+    try {
+      optionRows = win.QuizZyExtractor.getLastOptionElements();
+    } catch (_) {}
+  }
+  if (!optionRows || optionRows.length === 0) {
+    if (win && Array.isArray(win.__QUIZZY_LAST_OPTION_ELEMENTS__)) {
+      optionRows = win.__QUIZZY_LAST_OPTION_ELEMENTS__.map(el => (el && typeof el.deref === "function") ? el.deref() : el).filter(Boolean);
+    }
+  }
+  if (!optionRows || optionRows.length === 0) {
+    const candidateQuery = doc.querySelectorAll("[class*='option' i], [class*='choice' i], [class*='checkbox' i], [class*='card' i], label, li, [role='checkbox']");
+    if (candidateQuery && candidateQuery.length >= 2) {
+      optionRows = Array.from(candidateQuery);
+    }
+  }
+
+  const numOptions = optionRows.length;
+  const indicesSet = new Set(Array.isArray(targetIndices) ? targetIndices : []);
+  const checkedIndices = [];
+
+  for (const idx of indicesSet) {
+    if (idx < 0 || idx >= numOptions) continue;
+    const optEl = optionRows[idx];
+    if (!optEl) continue;
+
+    const inputEl = optEl.querySelector ? optEl.querySelector("input[type='checkbox'], [role='checkbox']") : null;
+    const indicatorEl = (optEl.querySelector ? optEl.querySelector("svg, [class*='checkbox' i], [class*='indicator' i], [class*='box' i]") : null) || (optEl.firstElementChild || null);
+    const labelEl = (optEl.tagName === "LABEL") ? optEl : (optEl.querySelector ? optEl.querySelector("label") : null);
+    const rowEl = optEl;
+
+    const isAlreadyChecked = inputEl && (inputEl.checked === true || inputEl.getAttribute("aria-checked") === "true");
+    if (isAlreadyChecked) {
+      checkedIndices.push(idx);
+      continue;
+    }
+
+    // Attempt 1: Direct MAIN-world click on inputEl || indicatorEl || labelEl || rowEl
+    const clickTarget = inputEl || indicatorEl || labelEl || rowEl;
+    if (clickTarget && typeof clickTarget.click === "function") {
+      try { clickTarget.click(); } catch (_) {}
+    }
+
+    if (inputEl && inputEl.checked === true) {
+      checkedIndices.push(idx);
+      continue;
+    }
+
+    // Attempt 2: React Fiber / Props Synthetic onChange / onClick invocation
+    const nodesToInspect = [inputEl, indicatorEl, labelEl, rowEl].filter(Boolean);
+    let currParent = rowEl ? rowEl.parentElement : null;
+    for (let p = 0; p < 4 && currParent; p++) {
+      nodesToInspect.push(currParent);
+      currParent = currParent.parentElement;
+    }
+
+    let invoked = false;
+    for (const node of nodesToInspect) {
+      try {
+        const keys = Object.keys(node);
+        const reactKey = keys.find(k => k.startsWith("__reactProps$") || k.startsWith("__reactFiber$"));
+        if (reactKey) {
+          const props = node[reactKey].memoizedProps || node[reactKey];
+          if (props) {
+            if (typeof props.onChange === "function") {
+              const syntheticEv = {
+                target: inputEl || node,
+                currentTarget: inputEl || node,
+                type: "change",
+                bubbles: true,
+                preventDefault: () => {},
+                stopPropagation: () => {},
+                nativeEvent: new Event("change")
+              };
+              props.onChange(syntheticEv);
+              if (inputEl) inputEl.checked = true;
+              invoked = true;
+              break;
+            } else if (typeof props.onClick === "function") {
+              props.onClick({
+                target: inputEl || node,
+                currentTarget: inputEl || node,
+                type: "click",
+                bubbles: true,
+                preventDefault: () => {},
+                stopPropagation: () => {}
+              });
+              if (inputEl) inputEl.checked = true;
+              invoked = true;
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    if (invoked || (inputEl && inputEl.checked === true)) {
+      checkedIndices.push(idx);
+    }
+  }
+
+  return { success: true, ok: true, checkedIndices };
 }
 
 // ==========================================================================
@@ -2578,12 +2812,12 @@ function readCodeFromMainWorld() {
       try {
         const reqM = win.require("vs/editor/editor.main");
         if (reqM && reqM.editor) return reqM;
-      } catch (_) {}
+      } catch (_) { }
       if (win.require.s && win.require.s.contexts && win.require.s.contexts._) {
         try {
           const def = win.require.s.contexts._.defined;
           if (def && def["vs/editor/editor.main"]) return def["vs/editor/editor.main"];
-        } catch (_) {}
+        } catch (_) { }
       }
     }
     return null;
@@ -2637,10 +2871,10 @@ function readCodeFromMainWorld() {
             if (!e) return false;
             let isReadOnly = false;
             if (typeof e.getOption === "function" && activeMonaco.editor && activeMonaco.editor.EditorOption) {
-              try { isReadOnly = e.getOption(activeMonaco.editor.EditorOption.readOnly) === true; } catch (_) {}
+              try { isReadOnly = e.getOption(activeMonaco.editor.EditorOption.readOnly) === true; } catch (_) { }
             }
             if (!isReadOnly && typeof e.getRawOptions === "function") {
-              try { isReadOnly = (e.getRawOptions() || {}).readOnly === true; } catch (_) {}
+              try { isReadOnly = (e.getRawOptions() || {}).readOnly === true; } catch (_) { }
             }
             if (isReadOnly) return false;
 
@@ -2724,7 +2958,7 @@ function readCodeFromMainWorld() {
         }
       }
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // 2. Ace Editor (Direct API & DOM Expando)
   if (!code) {
@@ -2757,10 +2991,10 @@ function readCodeFromMainWorld() {
         if (ed && typeof ed.getValue === "function") {
           code = ed.getValue();
           editorType = "ace";
-          try { language = ed.session.getMode().$id.split("/").pop(); } catch (_) {}
+          try { language = ed.session.getMode().$id.split("/").pop(); } catch (_) { }
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // 3. React Fiber Traversal for Monaco or Ace
@@ -2801,9 +3035,9 @@ function readCodeFromMainWorld() {
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // 5. CodeMirror 5 / 6
@@ -2961,12 +3195,12 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
       try {
         const reqM = win.require("vs/editor/editor.main");
         if (reqM && reqM.editor) return reqM;
-      } catch (_) {}
+      } catch (_) { }
       if (win.require.s && win.require.s.contexts && win.require.s.contexts._) {
         try {
           const def = win.require.s.contexts._.defined;
           if (def && def["vs/editor/editor.main"]) return def["vs/editor/editor.main"];
-        } catch (_) {}
+        } catch (_) { }
       }
     }
     return null;
@@ -3024,10 +3258,10 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
               if (!e) return false;
               let isReadOnly = false;
               if (typeof e.getOption === "function" && activeMonaco.editor && activeMonaco.editor.EditorOption) {
-                try { isReadOnly = e.getOption(activeMonaco.editor.EditorOption.readOnly) === true; } catch (_) {}
+                try { isReadOnly = e.getOption(activeMonaco.editor.EditorOption.readOnly) === true; } catch (_) { }
               }
               if (!isReadOnly && typeof e.getRawOptions === "function") {
-                try { isReadOnly = (e.getRawOptions() || {}).readOnly === true; } catch (_) {}
+                try { isReadOnly = (e.getRawOptions() || {}).readOnly === true; } catch (_) { }
               }
               if (isReadOnly) return false;
 
@@ -3077,7 +3311,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
               onChange: fiberScan.onChange
             };
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       if (activeMonaco && activeMonaco.editor && typeof activeMonaco.editor.getModels === "function") {
@@ -3113,7 +3347,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
               };
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       if (monacoEl) {
@@ -3185,7 +3419,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
               onChange: fiberScan.onChange
             };
           }
-        } catch (_) {}
+        } catch (_) { }
       }
       if (aceEl) {
         let curEl = aceEl;
@@ -3241,9 +3475,9 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
                 }
               }
             }
-          } catch (_) {}
+          } catch (_) { }
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // 4. CodeMirror 5 / 6
@@ -3430,7 +3664,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
   if (discovered.type === "ace" && discovered.instance) {
     const editor = discovered.instance;
     if (typeof editor.focus === "function") {
-      try { editor.focus(); } catch (_) {}
+      try { editor.focus(); } catch (_) { }
     }
 
     // Save and disable auto behaviors
@@ -3442,7 +3676,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
         editor.setOption("behavioursEnabled", false);
         editor.setOption("wrapBehavioursEnabled", false);
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // Non-paste buffer replacement
     if (editor.session && editor.session.doc && typeof editor.session.doc.setValue === "function") {
@@ -3461,11 +3695,11 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
       if (typeof editor._signal === "function") {
         editor._signal("change", {});
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // Sync React Fiber onChange callback
     if (typeof discovered.onChange === "function") {
-      try { discovered.onChange(finalCode); } catch (_) {}
+      try { discovered.onChange(finalCode); } catch (_) { }
     }
 
     // Dispatch simulated keyboard event on Ace hidden textarea
@@ -3475,14 +3709,14 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
         hiddenTa.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", code: "ShiftRight", bubbles: true }));
         hiddenTa.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
         hiddenTa.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift", code: "ShiftRight", bubbles: true }));
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // Restore auto behaviors
     try {
       if (typeof editor.setBehavioursEnabled === "function") editor.setBehavioursEnabled(savedBehaviours);
       if (typeof editor.clearSelection === "function") editor.clearSelection();
-    } catch (_) {}
+    } catch (_) { }
 
     verifiedCode = typeof editor.getValue === "function" ? editor.getValue() : finalCode;
   }
@@ -3491,7 +3725,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
     const model = discovered.model || (editor && editor.getModel ? editor.getModel() : null);
 
     if (editor && typeof editor.focus === "function") {
-      try { editor.focus(); } catch (_) {}
+      try { editor.focus(); } catch (_) { }
     }
 
     const fullRange = model && typeof model.getFullModelRange === "function"
@@ -3507,7 +3741,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
           forceMoveMarkers: true
         }]);
         editApplied = true;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     if (!editApplied || (model && typeof model.getValue === "function" && model.getValue().trim() !== finalCode.trim())) {
@@ -3523,11 +3757,11 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
     }
 
     if (editor && typeof editor.trigger === "function") {
-      try { editor.trigger("keyboard", "type", { text: "" }); } catch (_) {}
+      try { editor.trigger("keyboard", "type", { text: "" }); } catch (_) { }
     }
 
     if (typeof discovered.onChange === "function") {
-      try { discovered.onChange(finalCode, {}); } catch (_) {}
+      try { discovered.onChange(finalCode, {}); } catch (_) { }
     }
 
     verifiedCode = (model && typeof model.getValue === "function") ? model.getValue() : finalCode;
@@ -3537,7 +3771,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
       discovered.instance.setValue(finalCode);
     }
     if (typeof discovered.onChange === "function") {
-      try { discovered.onChange(finalCode); } catch (_) {}
+      try { discovered.onChange(finalCode); } catch (_) { }
     }
     verifiedCode = typeof discovered.instance.getValue === "function" ? discovered.instance.getValue() : finalCode;
   }
@@ -3551,11 +3785,11 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
   else if (discovered.type === "textarea" && discovered.element) {
     const el = discovered.element;
     if (typeof el.focus === "function") {
-      try { el.focus(); } catch (_) {}
+      try { el.focus(); } catch (_) { }
     }
     el.value = finalCode;
-    try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_) {}
-    try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (_) {}
+    try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_) { }
+    try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (_) { }
     verifiedCode = el.value;
   }
 
@@ -3578,8 +3812,10 @@ if (typeof globalThis !== "undefined") {
   globalThis.updateActionBadge = updateActionBadge;
   globalThis.readCodeFromMainWorld = readCodeFromMainWorld;
   globalThis.writeCodeWithHumanTypingInMainWorld = writeCodeWithHumanTypingInMainWorld;
+  globalThis.selectMultiOptionsInMainWorld = selectMultiOptionsInMainWorld;
   globalThis.ensureScriptInjected = ensureScriptInjected;
   globalThis.injectedTabScripts = injectedTabScripts;
+  globalThis.isBackendRunning = isBackendRunning;
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -3591,8 +3827,10 @@ if (typeof module !== "undefined" && module.exports) {
     updateActionBadge,
     readCodeFromMainWorld,
     writeCodeWithHumanTypingInMainWorld,
+    selectMultiOptionsInMainWorld,
     ensureScriptInjected,
-    injectedTabScripts
+    injectedTabScripts,
+    get isBackendRunning() { return isBackendRunning; }
   };
 }
 

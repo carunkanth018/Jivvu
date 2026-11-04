@@ -10,16 +10,29 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from dotenv import load_dotenv
 
+import hashlib
+
 # Non-chat model exclusion keywords (embedding, reranker, content-safety, guard, whisper, tts)
 NON_CHAT_KEYWORDS = ("embed", "rerank", "safety", "guard", "whisper", "tts")
 
 _key_quarantine_until: Dict[str, float] = {}
+_key_model_quarantine_until: Dict[Tuple[str, str], float] = {}
+_rate_limit_headers_cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+_last_model_used_time: Dict[Tuple[str, str, str], float] = {}
 _model_quarantine_until: Dict[str, float] = {}
 _provider_cooldown_until: Dict[str, float] = {}
 _model_cooldown_until: Dict[Tuple[str, str], float] = {}
 _openrouter_key_rr_idx: int = 0
 _groq_key_rr_idx: int = 0
 _gemini_key_rr_idx: int = 0
+
+GROQ_PRIORITY_BUCKETS: List[Dict[str, Any]] = [
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "family": "gpt-oss", "tier": "S", "priority": 1},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "family": "llama", "tier": "S", "priority": 2},
+    {"provider": "groq", "model": "openai/gpt-oss-20b", "family": "gpt-oss", "tier": "A", "priority": 3},
+    {"provider": "groq", "model": "qwen/qwen3.8-27b", "family": "qwen", "tier": "S", "priority": 4},
+    {"provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct", "family": "llama", "tier": "A", "priority": 5},
+]
 
 TIER_WEIGHT: Dict[str, int] = {"S": 1, "A": 2, "B": 3}
 
@@ -140,6 +153,187 @@ def reset_key_quarantine() -> None:
     _openrouter_key_rr_idx = 0
     _model_cooldown_until.clear()
     reset_provider_cooldown()
+    reset_key_model_quarantine()
+
+
+def _key_hash(key: str) -> str:
+    if not key:
+        return "empty"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+
+
+def set_key_model_quarantine(key: str, model_id: str, duration_sec: float = 12.0) -> None:
+    """Quarantine a specific (key, model_id) pair without quarantining other models on that key."""
+    if not key or not model_id:
+        return
+    k_hash = _key_hash(key)
+    _key_model_quarantine_until[(k_hash, model_id.lower())] = time.time() + duration_sec
+    if key.startswith("gsk_"):
+        all_groq_keys = get_healthy_groq_keys()
+        if all_groq_keys and len(all_groq_keys) > 1:
+            all_exhausted = all(is_key_model_quarantined(k, model_id) for k in all_groq_keys)
+            if all_exhausted:
+                set_model_cooldown("groq", model_id, duration_sec)
+        else:
+            set_model_cooldown("groq", model_id, duration_sec)
+    else:
+        set_model_cooldown("openrouter", model_id, duration_sec)
+
+
+def is_key_model_quarantined(key: str, model_id: str) -> bool:
+    """Check if a specific (key, model_id) pair is currently quarantined."""
+    if not key or not model_id:
+        return False
+    k_hash = _key_hash(key)
+    until = _key_model_quarantine_until.get((k_hash, model_id.lower()), 0.0)
+    return time.time() < until
+
+
+def reset_key_model_quarantine() -> None:
+    """Reset key-model quarantine and rate-limit tracking caches."""
+    global _key_model_quarantine_until, _rate_limit_headers_cache, _last_model_used_time
+    _key_model_quarantine_until.clear()
+    _rate_limit_headers_cache.clear()
+    _last_model_used_time.clear()
+
+
+def record_rate_limit_headers(provider: str, key: str, model_id: str, headers: Any) -> None:
+    """Record sliding-window token and request quota headers from HTTP responses."""
+    if not provider or not model_id or not headers:
+        return
+    k_hash = _key_hash(key)
+    now = time.time()
+
+    rem_tokens = None
+    rem_requests = None
+    reset_tokens = None
+    retry_after = None
+
+    items = headers.items() if hasattr(headers, "items") else []
+    for h_name, h_val in items:
+        h_lower = str(h_name).lower()
+        if h_lower == "x-ratelimit-remaining-tokens":
+            try:
+                rem_tokens = int(h_val)
+            except (ValueError, TypeError):
+                pass
+        elif h_lower == "x-ratelimit-remaining-requests":
+            try:
+                rem_requests = int(h_val)
+            except (ValueError, TypeError):
+                pass
+        elif h_lower == "x-ratelimit-reset-tokens":
+            try:
+                reset_tokens = float(h_val)
+            except (ValueError, TypeError):
+                reset_tokens = str(h_val)
+        elif h_lower == "retry-after":
+            try:
+                retry_after = float(h_val)
+            except (ValueError, TypeError):
+                pass
+
+    _rate_limit_headers_cache[(provider.lower(), k_hash, model_id.lower())] = {
+        "timestamp": now,
+        "remaining_tokens": rem_tokens,
+        "remaining_requests": rem_requests,
+        "reset_tokens": reset_tokens,
+        "retry_after": retry_after,
+    }
+
+
+def record_model_usage(provider: str, key: str, model_id: str) -> None:
+    """Record the timestamp when a model was called on a specific API key."""
+    if not provider or not model_id:
+        return
+    k_hash = _key_hash(key)
+    _last_model_used_time[(provider.lower(), k_hash, model_id.lower())] = time.time()
+
+
+def is_model_bucket_healthy(provider: str, key: str, model_id: str) -> bool:
+    """
+    Check if a model bucket is healthy and eligible for proactive selection:
+    - Not in quarantine or rate-limit cooldown
+    - x-ratelimit-remaining-tokens >= 450
+    - x-ratelimit-remaining-requests > 1
+    - qwen/qwen3.8-27b not used in last 18.0s on this key
+    """
+    if not provider or not model_id:
+        return False
+    p_lower = provider.lower()
+    m_lower = model_id.lower()
+    k_hash = _key_hash(key)
+
+    if is_model_in_cooldown(p_lower, m_lower):
+        return False
+    if is_key_model_quarantined(key, m_lower):
+        return False
+    if is_model_quarantined(m_lower):
+        return False
+
+    now = time.time()
+
+    # qwen/qwen3.8-27b 18s spacing on Groq to prevent 1000 OTPM ceiling breaches
+    if "qwen3.8" in m_lower and p_lower == "groq":
+        last_used = _last_model_used_time.get((p_lower, k_hash, m_lower), 0.0)
+        if (now - last_used) < 18.0:
+            return False
+
+    cached = _rate_limit_headers_cache.get((p_lower, k_hash, m_lower))
+    if cached:
+        cache_age = now - cached.get("timestamp", 0.0)
+        if cache_age < 30.0:
+            rem_t = cached.get("remaining_tokens")
+            rem_r = cached.get("remaining_requests")
+            if rem_t is not None and rem_t < 450:
+                return False
+            if rem_r is not None and rem_r <= 1:
+                return False
+
+    return True
+
+
+def select_healthy_groq_pair(
+    groq_key: str,
+    exclude_models: Optional[Sequence[str]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Proactively select a healthy pair of Groq models (Primary A & B) from the prioritized multi-bucket pool:
+      1. openai/gpt-oss-120b
+      2. llama-3.3-70b-versatile
+      3. openai/gpt-oss-20b
+      4. qwen/qwen3.8-27b
+      5. meta-llama/llama-4-scout-17b-16e-instruct
+    """
+    excluded = set(m.lower() for m in (exclude_models or []))
+    candidates = [b for b in GROQ_PRIORITY_BUCKETS if b["model"].lower() not in excluded]
+
+    healthy_candidates = [c for c in candidates if is_model_bucket_healthy("groq", groq_key, c["model"])]
+    if not healthy_candidates:
+        healthy_candidates = [
+            c for c in candidates
+            if not is_model_in_cooldown("groq", c["model"]) and not is_key_model_quarantined(groq_key, c["model"])
+        ]
+        if not healthy_candidates:
+            healthy_candidates = list(candidates)
+
+    primary_a = healthy_candidates[0]
+    primary_b = None
+    for cand in healthy_candidates[1:]:
+        if cand.get("family") != primary_a.get("family"):
+            primary_b = cand
+            break
+    if primary_b is None and len(healthy_candidates) > 1:
+        primary_b = healthy_candidates[1]
+    if primary_b is None:
+        for cand in candidates:
+            if cand["model"] != primary_a["model"]:
+                primary_b = cand
+                break
+    if primary_b is None:
+        primary_b = primary_a
+
+    return primary_a, primary_b
 
 
 def quarantine_model(model_slug: str, duration_sec: float = 60.0) -> None:
@@ -202,13 +396,24 @@ def get_healthy_groq_keys() -> List[str]:
     return healthy if healthy else all_keys
 
 
-def get_next_groq_key(exclude: Optional[str] = None) -> str:
-    """Return next round-robin healthy Groq API key, excluding a quarantined/exhausted key if requested."""
+def get_next_groq_key(exclude: Optional[str] = None, model: Optional[str] = None) -> str:
+    """Return next round-robin healthy Groq API key, excluding a quarantined/exhausted key or model if requested."""
     global _groq_key_rr_idx
     healthy = get_healthy_groq_keys()
     if not healthy:
         return ""
-    candidates = [k for k in healthy if k != exclude] if (exclude and len(healthy) > 1) else healthy
+    candidates = [k for k in healthy if k != exclude] if (exclude and len(healthy) > 1) else list(healthy)
+    if model:
+        m_lower = model.lower()
+        model_healthy = [
+            k for k in candidates
+            if not is_key_model_quarantined(k, m_lower) and is_model_bucket_healthy("groq", k, m_lower)
+        ]
+        if not model_healthy:
+            model_healthy = [k for k in candidates if not is_key_model_quarantined(k, m_lower)]
+        if model_healthy:
+            candidates = model_healthy
+
     idx = _groq_key_rr_idx % len(candidates)
     _groq_key_rr_idx += 1
     return candidates[idx]

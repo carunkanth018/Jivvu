@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from backend.core.key_pool import (
     TIER_WEIGHT,
     extract_model_meta,
+    get_next_groq_key,
     get_next_openrouter_key,
     is_model_quarantined,
     is_provider_in_cooldown,
@@ -35,6 +36,28 @@ def _dispatch(name: str, fallback_fn: Any) -> Any:
     if mod and hasattr(mod, name):
         return getattr(mod, name)
     return fallback_fn
+
+
+def are_answers_in_consensus(
+    norm1: Optional[NormalizedAnswer],
+    norm2: Optional[NormalizedAnswer],
+    q_type: str = "mcq",
+) -> bool:
+    """Check if two normalized answers agree with set-invariance for multi-select and whitespace tolerance."""
+    if not norm1 or not norm2:
+        return False
+    if norm1.canonical_key == norm2.canonical_key:
+        return True
+    if q_type in ("multi", "multi_mcq", "multiselect"):
+        if norm1.selected_indices and norm2.selected_indices:
+            if tuple(sorted(norm1.selected_indices)) == tuple(sorted(norm2.selected_indices)):
+                return True
+        keys1 = set(norm1.canonical_keys or [k.strip() for k in (norm1.canonical_key or "").split(",") if k.strip()])
+        keys2 = set(norm2.canonical_keys or [k.strip() for k in (norm2.canonical_key or "").split(",") if k.strip()])
+        return bool(keys1 and keys1 == keys2)
+    if (norm1.canonical_key or "").replace(" ", "") == (norm2.canonical_key or "").replace(" ", ""):
+        return True
+    return False
 
 
 class SolverResponse(BaseModel):
@@ -79,8 +102,10 @@ async def run_groq_arbiter_fallback(
     Uses openai/gpt-oss-20b (a fast, distinct model family on Groq).
     """
     if not groq_key:
-        groq_keys = load_groq_api_keys()
-        groq_key = groq_keys[0] if groq_keys else ""
+        groq_key = get_next_groq_key(model=arbiter_model)
+        if not groq_key:
+            groq_keys = load_groq_api_keys()
+            groq_key = groq_keys[0] if groq_keys else ""
     if not groq_key:
         return None, [], {"error": "NO_GROQ_KEY", "success": False}
 
@@ -274,7 +299,7 @@ async def run_hedged_openrouter_fallback(
 
                 # First-to-agree with Primary A or B
                 if succ and norm:
-                    if succ_a and norm_a and norm.canonical_key == norm_a.canonical_key:
+                    if succ_a and norm_a and are_answers_in_consensus(norm, norm_a, q_type):
                         for p in pending:
                             p.cancel()
                         await asyncio.sleep(0)
@@ -295,7 +320,7 @@ async def run_hedged_openrouter_fallback(
                         )
                         break
 
-                    if succ_b and norm_b and norm.canonical_key == norm_b.canonical_key:
+                    if succ_b and norm_b and are_answers_in_consensus(norm, norm_b, q_type):
                         for p in pending:
                             p.cancel()
                         await asyncio.sleep(0)
@@ -325,7 +350,7 @@ async def run_hedged_openrouter_fallback(
                     for j_fb in range(i_fb + 1, len(successful_fbs)):
                         r1, r2 = successful_fbs[i_fb], successful_fbs[j_fb]
                         norm1, norm2 = r1[4], r2[4]
-                        if norm1.canonical_key == norm2.canonical_key:
+                        if are_answers_in_consensus(norm1, norm2, q_type):
                             for p in pending:
                                 p.cancel()
                             parsed1, parsed2 = r1[3], r2[3]
@@ -390,7 +415,7 @@ async def run_hedged_openrouter_fallback(
             for j_fb in range(i_fb + 1, len(successful_fbs)):
                 r1, r2 = successful_fbs[i_fb], successful_fbs[j_fb]
                 norm1, norm2 = r1[4], r2[4]
-                if norm1.canonical_key == norm2.canonical_key:
+                if are_answers_in_consensus(norm1, norm2, q_type):
                     parsed1, parsed2 = r1[3], r2[3]
                     reason = parsed1.reason if parsed1 else (parsed2.reason if parsed2 else "")
                     rescue_solution = SolverResponse(
@@ -647,6 +672,48 @@ def solve_offline_fixture(
                 models_called=["fixture_offline:primary_a", "fixture_offline:primary_b"],
                 agreement_details={"fixture": True},
             )
+
+    # 11b. Asteroid Collision multi-select
+    if "asteroid" in q_clean:
+        matched_i = []
+        for i, o in enumerate(norm_opts):
+            if "smaller than" in o or "equal magnitude" in o:
+                matched_i.append(i)
+        if matched_i:
+            matched_i.sort()
+            keys = [chr(65 + i) for i in matched_i]
+            texts = [options[i] for i in matched_i]
+            return SolverResponse(
+                status="OK",
+                confidence_tier="HIGH_BOTH_AGREE",
+                canonical_key=",".join(keys),
+                selected_index=matched_i[0],
+                selected_text=", ".join(texts),
+                selected_indices=matched_i,
+                selected_texts=texts,
+                canonical_keys=keys,
+                reason="In Asteroid Collision: (1) Asteroid in stack is smaller than current moving left (stack asteroid destroyed), (2) Both equal magnitude (both destroyed), (3) Current is smaller than asteroid in stack (current destroyed). All 3 conditions lead to destruction.",
+                latency_ms=15.0,
+                models_called=["fixture_offline:primary_a", "fixture_offline:primary_b"],
+                agreement_details={"fixture": True},
+            )
+
+    # 11c. Queue front() operation
+    if "queue" in q_clean and "front()" in q_clean:
+        for i, o in enumerate(norm_opts):
+            if o == "10":
+                letter = chr(65 + i)
+                return SolverResponse(
+                    status="OK",
+                    confidence_tier="HIGH_BOTH_AGREE",
+                    canonical_key=letter,
+                    selected_index=i,
+                    selected_text=options[i],
+                    reason="In a queue with elements [10, 20, 30] inserted in sequence, front() accesses the first element (10) without dequeuing it.",
+                    latency_ms=10.0,
+                    models_called=["fixture_offline:primary_a", "fixture_offline:primary_b"],
+                    agreement_details={"fixture": True},
+                )
 
     # 12b. Algorithms: Maximum Subarray Sum (Kadane's)
     if 'largest sum' in q_clean and 'subarray' in q_clean:

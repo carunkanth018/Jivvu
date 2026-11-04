@@ -249,6 +249,32 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ==========================================================================
+  // Safe Extension Messaging Helper
+  // ==========================================================================
+  function safeSendMessage(message, callback) {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      if (typeof callback === "function") callback(null, new Error("Runtime unavailable"));
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const err = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError : null;
+        if (typeof callback === "function") {
+          try {
+            callback(response, err);
+          } catch (_) {}
+        }
+      });
+    } catch (syncErr) {
+      if (typeof callback === "function") {
+        try {
+          callback(null, syncErr);
+        } catch (_) {}
+      }
+    }
+  }
+
+  // ==========================================================================
   // Backend Health Check
   // ==========================================================================
   async function checkBackendHealth() {
@@ -256,8 +282,8 @@ document.addEventListener("DOMContentLoaded", () => {
     statusText.textContent = "Connecting...";
 
     try {
-      chrome.runtime.sendMessage({ action: "CHECK_HEALTH" }, (response) => {
-        if (chrome.runtime.lastError || !response || !response.success) {
+      safeSendMessage({ action: "CHECK_HEALTH" }, (response) => {
+        if (!response || !response.success) {
           statusPill.className = "status-pill status-offline";
           statusText.textContent = "Offline";
           statusPill.title = "Backend is offline. Run 'uvicorn backend.app:app' on http://127.0.0.1:8000";
@@ -278,9 +304,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnRefreshHealth.addEventListener("click", () => {
       checkBackendHealth();
       if (statusText && statusText.textContent.toLowerCase().includes("offline")) {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "START_BACKEND" }).catch(() => {});
-        }
+        safeSendMessage({ action: "START_BACKEND" });
       }
     });
   }
@@ -593,10 +617,10 @@ document.addEventListener("DOMContentLoaded", () => {
     toggleDomHighlight.addEventListener("change", () => {
       chrome.storage.local.set({ domHighlightEnabled: toggleDomHighlight.checked });
       if (!toggleDomHighlight.checked) {
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           action: "APPLY_HIGHLIGHT",
           payload: { remove: true }
-        }).catch(() => {});
+        });
       }
     });
   }
@@ -849,13 +873,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Opt-In Page DOM Highlighting (if explicitly enabled)
       if (toggleDomHighlight.checked && typeof solution.selected_index === "number") {
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           action: "APPLY_HIGHLIGHT",
           payload: {
             selected_index: solution.selected_index,
             customSelectors: getCustomSelectors()
           }
-        }).catch(() => {});
+        });
       }
     }
 
@@ -1465,10 +1489,10 @@ document.addEventListener("DOMContentLoaded", () => {
               ? { target_order_badges: solution.ordered_texts }
               : { selected_index: targetIdx };
 
-            chrome.runtime.sendMessage({
+            safeSendMessage({
               action: "APPLY_DOM_HIGHLIGHT",
               payload: highlightPayload
-            }).catch(() => {});
+            });
 
             // Advance to next question so auto mode keeps running!
             chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }, () => {
@@ -1896,7 +1920,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (e.altKey && (key === "n" || code === "KeyN")) {
       e.preventDefault();
-      chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }).catch(() => {});
+      safeSendMessage({ action: "CLICK_NEXT_BUTTON" });
       return;
     }
 
@@ -1905,7 +1929,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (btnSwipeAdvance) {
         btnSwipeAdvance.click();
       } else {
-        chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }).catch(() => {});
+        safeSendMessage({ action: "SWIPE_OR_ADVANCE" });
       }
       return;
     }
@@ -1953,7 +1977,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (msg.action === "CLOSE_SIDEPANEL_COMMAND") {
         window.close();
         if (typeof sendResponse === "function") sendResponse({ success: true, closed: true });
-        return true;
+        return;
       }
       if (msg.action === "FORWARD_SHORTCUT_TO_SIDEPANEL" || msg.action === "SHORTCUT_ACTION") {
         const cmd = msg.command;
@@ -1962,10 +1986,10 @@ document.addEventListener("DOMContentLoaded", () => {
         } else if (cmd === "trigger_apply") {
           if (btnApplyOnce) btnApplyOnce.click();
         } else if (cmd === "trigger_next") {
-          chrome.runtime.sendMessage({ action: "CLICK_NEXT_BUTTON" }).catch(() => {});
+          safeSendMessage({ action: "CLICK_NEXT_BUTTON" });
         } else if (cmd === "trigger_advance") {
           if (btnSwipeAdvance) btnSwipeAdvance.click();
-          else chrome.runtime.sendMessage({ action: "SWIPE_OR_ADVANCE" }).catch(() => {});
+          else safeSendMessage({ action: "SWIPE_OR_ADVANCE" });
         } else if (cmd === "trigger_auto" || cmd === "trigger_auto_loop") {
           if (isAutoRunning) {
             triggerKillSwitch("Stopped via shortcut");
@@ -1979,7 +2003,7 @@ document.addEventListener("DOMContentLoaded", () => {
           triggerKillSwitch("Stopped via shortcut");
         }
         if (typeof sendResponse === "function") sendResponse({ success: true, handled: true });
-        return true;
+        return;
       }
     });
   }

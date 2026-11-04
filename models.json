@@ -36,12 +36,6 @@
       "model": "google/gemma-4-31b-it:free",
       "tier": "S",
       "priority": 6
-    },
-    {
-      "provider": "openrouter",
-      "model": "liquid/lfm-2.5-2.6b:free",
-      "tier": "B",
-      "priority": 7
     }
   ],
   "primary_a": {
@@ -58,6 +52,43 @@
     "tier": "S",
     "priority": 2
   },
+  "groq_buckets": [
+    {
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "family": "gpt-oss",
+      "tier": "S",
+      "priority": 1
+    },
+    {
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile",
+      "family": "llama",
+      "tier": "S",
+      "priority": 2
+    },
+    {
+      "provider": "groq",
+      "model": "openai/gpt-oss-20b",
+      "family": "gpt-oss",
+      "tier": "A",
+      "priority": 3
+    },
+    {
+      "provider": "groq",
+      "model": "qwen/qwen3.8-27b",
+      "family": "qwen",
+      "tier": "S",
+      "priority": 4
+    },
+    {
+      "provider": "groq",
+      "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "family": "llama",
+      "tier": "A",
+      "priority": 5
+    }
+  ],
   "arbiter": {
     "provider": "groq",
     "model": "openai/gpt-oss-20b",
@@ -111,7 +142,7 @@
     },
     {
       "provider": "openrouter",
-      "family": "lfm",
+      "family": "liquid",
       "model": "liquid/lfm-2.5-2.6b:free",
       "tier": "B",
       "priority": 6
@@ -167,11 +198,11 @@
   },
   "timeouts_ms": {
     "groq_parallel_timeout_ms": 4500,
-    "openrouter_fallback_timeout_ms": 4500,
+    "openrouter_fallback_timeout_ms": 3200,
     "searxng_timeout_ms": 650,
     "searxng_grounded_llm_timeout_ms": 900,
     "s_tier_soft_escalation_ms": 1300,
-    "hard_total_budget_ms": 8000,
+    "hard_total_budget_ms": 6500,
     "max_tokens": 1024
   },
   "code_timeouts_ms": {

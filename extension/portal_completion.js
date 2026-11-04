@@ -1088,7 +1088,9 @@
         chrome.runtime.sendMessage({
           action: "PORTAL_COMPLETION_STATE_CHANGED",
           active: Boolean(active)
-        }).catch(() => {});
+        }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) {}
+        });
       }
     } catch (_) {}
   }
@@ -1140,9 +1142,21 @@
     };
   }
 
-  // Keyboard shortcut listener: Ctrl + Alt + 0
+  // Keyboard shortcut listener: Ctrl + Alt + 0 and Alt + R
   function handleKeyDown(e) {
     if (!e || e.__quizzy_handled__) return;
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "r" || e.key === "R" || e.code === "KeyR")) {
+      const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+      const tag = (activeEl && activeEl.tagName) ? activeEl.tagName.toUpperCase() : "";
+      const isEdit = tag === "INPUT" || tag === "TEXTAREA" || (activeEl && activeEl.isContentEditable) || (activeEl && activeEl.closest && activeEl.closest('.monaco-editor, .ace_editor'));
+      if (!isEdit && typeof window !== "undefined" && typeof window.__QUIZZY_SOFT_REFRESH_EXTENSION__ === "function") {
+        if (typeof e.preventDefault === "function") e.preventDefault();
+        if (typeof e.stopPropagation === "function") e.stopPropagation();
+        e.__quizzy_handled__ = true;
+        window.__QUIZZY_SOFT_REFRESH_EXTENSION__();
+        return;
+      }
+    }
     if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
       if (typeof e.preventDefault === "function") e.preventDefault();
       if (typeof e.stopPropagation === "function") e.stopPropagation();

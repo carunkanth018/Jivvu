@@ -53,13 +53,21 @@ from backend.telemetry_db import (
     record_request_log,
     validate_accuracy_and_classify_error,
 )
+from backend.core.key_pool import (
+    get_healthy_groq_keys,
+    load_groq_api_keys,
+    reset_key_quarantine,
+    reset_model_cooldown,
+    reset_model_quarantine,
+    reset_provider_cooldown,
+)
 from backend.core.llm_client import (
     get_active_fallback_pool,
     load_models_config,
     load_openrouter_api_keys,
     solve_question,
 )
-from backend.core.normalizer import normalize_text_answer
+from backend.core.normalizer import normalize_text_answer, snap_to_closest_option
 from backend.core.searxng_client import get_searxng_config, is_searxng_circuit_open
 from backend.model_manager import (
     get_active_model_selection,
@@ -511,6 +519,30 @@ def _prune_coalesce_cache(now: float) -> None:
             _recent_solved_coalesce.pop(k, None)
 
 
+@app.post("/api/reset-state")
+@app.post("/reset-state")
+async def reset_backend_state() -> Dict[str, Any]:
+    """
+    Clear in-flight solve locks, recent solve coalesce cache, and rate-limit quarantines/cooldowns.
+    Resets in-memory rate limit and execution states immediately without altering persistent SQLite caches.
+    """
+    global _recent_solved_coalesce
+    async with _in_flight_mutex:
+        for fut in list(_in_flight_locks.values()):
+            if fut and not fut.done():
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+        _in_flight_locks.clear()
+    _recent_solved_coalesce.clear()
+    reset_key_quarantine()
+    reset_model_quarantine()
+    reset_provider_cooldown()
+    reset_model_cooldown()
+    return {"ok": True, "status": "ok", "state_reset": True, "message": "Backend state reset successfully"}
+
+
 def remap_response_to_follower_options(res: SolveResponse, follower_options: List[str]) -> SolveResponse:
     """
     Dynamically remap leader SolveResponse indices, answers, canonical keys, and permutation
@@ -575,7 +607,7 @@ def remap_response_to_follower_options(res: SolveResponse, follower_options: Lis
             return res.model_copy(update={
                 "permutation_indices": remapped_indices,
                 "ordered_texts": [follower_options[i] for i in remapped_indices],
-                "canonical_keys": canonical_str,
+                "canonical_keys": letters,
                 "answer": canonical_str,
             })
         return res
@@ -596,11 +628,15 @@ def remap_response_to_follower_options(res: SolveResponse, follower_options: Lis
         if remapped_indices_multi:
             sorted_indices = sorted(remapped_indices_multi)
             letters = [chr(65 + i) for i in sorted_indices]
-            canonical_str = ",".join(letters)
+            sep = ", " if ", " in (res.answer or "") else ","
+            canonical_str = sep.join(letters)
+            selected_texts = [follower_options[i] for i in sorted_indices]
             return res.model_copy(update={
                 "selected_indices": sorted_indices,
-                "selected_texts": [follower_options[i] for i in sorted_indices],
-                "canonical_keys": canonical_str,
+                "selected_texts": selected_texts,
+                "selected_index": sorted_indices[0],
+                "selected_text": ", ".join(selected_texts),
+                "canonical_keys": letters,
                 "answer": canonical_str,
             })
         return res
@@ -782,15 +818,42 @@ async def _solve_core(
                 image_url=getattr(req, "image_url", None),
             )
 
+        # Enforce strict post-check for Hallucinated Options
+        final_sel_idx = solver_res.selected_index
+        final_sel_text = solver_res.selected_text
+        final_sel_indices = getattr(solver_res, "selected_indices", None)
+        final_sel_texts = getattr(solver_res, "selected_texts", None)
+        final_canonical_keys = getattr(solver_res, "canonical_keys", None)
+
+        if req.q_type == "mcq" and req.options:
+            if final_sel_idx is None or final_sel_idx < 0 or final_sel_idx >= len(req.options):
+                snapped = snap_to_closest_option(final_sel_text or str(answer_val), req.options)
+                final_sel_idx = snapped if snapped is not None else 0
+            final_sel_text = req.options[final_sel_idx]
+            answer_val = chr(65 + final_sel_idx)
+
+        elif req.q_type == "multi" and req.options:
+            if final_sel_indices:
+                valid_indices = [idx for idx in final_sel_indices if 0 <= idx < len(req.options)]
+                if not valid_indices:
+                    snapped = snap_to_closest_option(str(answer_val), req.options)
+                    valid_indices = [snapped] if snapped is not None else [0]
+                final_sel_indices = sorted(list(set(valid_indices)))
+                final_sel_texts = [req.options[idx] for idx in final_sel_indices]
+                final_canonical_keys = [chr(65 + idx) for idx in final_sel_indices]
+                final_sel_idx = final_sel_indices[0]
+                final_sel_text = ", ".join(final_sel_texts)
+                answer_val = ",".join(final_canonical_keys)
+
         response = SolveResponse(
             status="ok" if is_ok else "uncertain",
             q_type=req.q_type,
             answer=answer_val,
-            selected_index=solver_res.selected_index,
-            selected_text=solver_res.selected_text,
-            selected_indices=getattr(solver_res, "selected_indices", None),
-            selected_texts=getattr(solver_res, "selected_texts", None),
-            canonical_keys=getattr(solver_res, "canonical_keys", None),
+            selected_index=final_sel_idx,
+            selected_text=final_sel_text,
+            selected_indices=final_sel_indices,
+            selected_texts=final_sel_texts,
+            canonical_keys=final_canonical_keys,
             permutation_indices=solver_res.permutation_indices,
             ordered_texts=solver_res.ordered_texts,
             reason=solver_res.reason or "",

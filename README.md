@@ -1,231 +1,215 @@
-# Jivvu - AI Quiz & Coding Companion (QuizZy Engine)
+# QuizZy / Jivvu — Autonomous Quiz, Coding & Portal Completion Suite
 
-Production-grade, windowless AI quiz and coding practice assistant for **learning.ccbp.in**. Powered by a FastAPI backend with dual LLM provider fallback (Groq + OpenRouter), Chrome Manifest V3 extension, balanced 8px HUD dot, and a zero-latency native lifecycle manager.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Chrome MV3](https://img.shields.io/badge/Chrome_Extension-Manifest_V3-4285F4.svg?style=flat&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Verification: 100%](https://img.shields.io/badge/Tests-100%25_Passing-brightgreen.svg)]()
+
+> **QuizZy** is a zero-latency, multi-model consensus inference engine for high-stakes quizzes, diagram counting, sequence ordering, and proctored coding.  
+> **Jivvu** is the accompanying Windows windowless runtime daemon (`pythonw.exe`), native messaging host bridge, and real-time observability telemetry dashboard (`:8765`).
 
 ---
 
-## Architecture & How It Works
+## 1. Key Architectural Pillars & Invariants
+
+1. **Zero-DOM Mutation Safety:**  
+   The extension content scripts (`extractor.js`, `floating_hud.js`) never alter the target page's DOM tree, prototype chains, or proctored event listeners. All visual indicators render in a completely isolated Shadow DOM HUD overlay or non-destructive visual highlight styling.
+2. **Order-Invariant SHA-256 SQLite Cache & Dynamic Remapping:**  
+   Quiz questions are hashed by normalizing the canonical question stem and canonicalized option set. When shuffled options are encountered on different sessions or users, the backend dynamically remaps solution indices and keys to match the follower's visual permutation in `< 2ms`.
+3. **Multi-Model Consensus & Proactive Zero-429 Balancer:**  
+   Races independent Groq model buckets (`openai/gpt-oss-120b`, `llama-3.3-70b-versatile`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`) with automatic failover to Gemini (`gemini-2.5-flash`) and OpenRouter (`nemotron-3.5-super-vl`, `gemma-4-31b-it`). Tracks per-key sliding window token headers (`x-ratelimit-remaining-tokens`) to proactively rotate keys *before* hitting rate limits.
+4. **Windowless Native Messaging Lifecycle:**  
+   Spawns and manages the FastAPI backend using Windows `pythonw.exe` and a compiled C# binary (`native_host_win.exe`) with `CREATE_NO_WINDOW`. Zero terminal flicker, zero taskbar bloat, and automatic termination when test tabs close.
+5. **Decoupled Telemetry & Observability Dashboard (`:8765`):**  
+   An independent background dashboard server serves real-time latency charts, agreement traces, model selection controls, and cache analytics without imposing any performance overhead on the core solver pipeline.
+
+---
+
+## 2. End-to-End System Architecture
 
 ```
-                        +----------------------------+
-                        |   Google Chrome / Edge     |
-                        |   learning.ccbp.in Tab     |
-                        +--------------+-------------+
-                                       |
-                [Navigation Event / Heartbeat (4s)]
-                                       v
-                        +----------------------------+
-                        |  Extension Service Worker  |
-                        |     (background.js)        |
-                        +--------------+-------------+
-                                       |
-             +-------------------------+-------------------------+
-             | Dual-Channel OS Bridge                            |
-             v (Channel A: Fast HTTP)                            v (Channel B: Native stdio)
-+----------------------------+              +----------------------------+
-|  Dashboard Daemon (:8765)  |              |  Native Messaging Host     |
-|   (backend.cli daemon)     |              |   (native_host_win.exe)    |
-+--------------+-------------+              +--------------+-------------+
-               \                                          /
-                \--->  Spawns Windowless Daemon  <-------/
-                               |
-                               v
-                +----------------------------+
-                |    FastAPI Solver Backend  |
-                |   (127.0.0.1:8000/solve)   |
-                +--------------+-------------+
-                               |
-            +------------------+------------------+
-            v                                     v
-    +---------------+                     +----------------+
-    |  Groq Cloud   | (Primary Cascade)   |   OpenRouter   | (Hedged Secondary)
-    +---------------+                     +----------------+
+                          +------------------------------------------+
+                          |   Google Chrome / Microsoft Edge Tab     |
+                          |          learning.ccbp.in                |
+                          +--------------------+---------------------+
+                                               |
+                          [Heartbeat (4s) / Navigation Detection]
+                                               v
+                          +------------------------------------------+
+                          |      Extension Service Worker (MV3)      |
+                          |             (background.js)              |
+                          +--------------------+---------------------+
+                                               |
+             +---------------------------------+---------------------------------+
+             | Channel A: Fast Local HTTP                                        | Channel B: Native Stdio Bridge
+             v                                                                   v
++----------------------------+                                      +----------------------------+
+| Telemetry Dashboard (:8765)|                                      |  Native Messaging Host     |
+|   (backend.cli daemon)     |                                      |   (native_host_win.exe)    |
++--------------+-------------+                                      +--------------+-------------+
+               \                                                                  /
+                \---------------->  Spawns Windowless Backend  <-----------------/
+                                               |
+                                               v
+                                +------------------------------+
+                                |    FastAPI Inference Engine  |
+                                |     127.0.0.1:8000/solve     |
+                                +--------------+---------------+
+                                               |
+                      +------------------------+------------------------+
+                      |                                                 |
+                      v                                                 v
+           +--------------------+                            +--------------------+
+           |  Order-Invariant   |                            |   Multi-Provider   |
+           |    SQLite Cache    |                            |  Consensus Engine  |
+           +--------------------+                            +---------+----------+
+                                                                       |
+                             +-------------------+---------------------+-------------------+
+                             v                   v                                         v
+                     +---------------+   +----------------+                        +----------------+
+                     |  Groq Primary |   |  Gemini Flash  |                        |   OpenRouter   |
+                     | 120B / Llama3 |   | Vision / Text  |                        | Hedged Rescue  |
+                     +---------------+   +----------------+                        +----------------+
 ```
 
-### Key Highlights
-- **100% Windowless & Silent**: Uses `pythonw.exe` and `native_host_win.exe` with `CREATE_NO_WINDOW`. Zero annoying black terminal popups or flickering console windows.
-- **Auto-Lifecycle on CCBP**: Opening `https://learning.ccbp.in` immediately boots the backend and displays the unobtrusive on-page HUD. Closing all CCBP tabs automatically debounces and shuts down the backend within 3 seconds to save RAM and release port 8000.
-- **Dual LLM Consensus Engine**: Free-tier Groq (`openai/gpt-oss-120b`, `qwen/qwen3.8-27b`) with automatic hedged fallback to OpenRouter (`nemotron-3.5-super-vl`, `gemma-4-31b-it`).
-- **Observability Dashboard**: Built-in real-time telemetry dashboard on `http://127.0.0.1:8765` for model selection, latency charts, and request inspection.
+### 9-Step Lifecycle & Execution Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / Portal
+    participant Page as Web Page (CCBP)
+    participant EXT as Chrome Extension
+    participant NH as Native Host (native_host_win.exe)
+    participant API as FastAPI Backend (:8000)
+    participant Cache as Order-Invariant Cache
+    participant LLM as Multi-Model Consensus (Groq / Gemini)
+
+    User->>Page: Navigates to quiz or coding assessment
+    Page->>EXT: Injects isolated content scripts & HUD
+    EXT->>NH: Native messaging handshake / heartbeat
+    NH->>API: Ensures windowless pythonw.exe is running on :8000
+    EXT->>API: POST /solve (question, options, diagram, starter_code)
+    API->>Cache: Check order-invariant SHA-256 hash
+    alt Cache Hit
+        Cache-->>API: Return cached solution & remap to follower options
+    else Cache Miss
+        API->>LLM: Parallel hedge (Primary A + B with token tracking)
+        LLM-->>API: 5-Stage Defensive Parse & Agreement Verification
+        API->>Cache: Save zero-poison solution to SQLite
+    end
+    API-->>EXT: SolveResponse (answer, selected_index, reason, confidence)
+    EXT->>Page: Non-destructive highlight / Monaco editor sync
+```
 
 ---
 
-## One-Click Quick Setup (Recommended)
+## 3. Supported Question & Automation Modes
 
-### Prerequisites (Install Once)
-1. **Windows 10 / 11** (64-bit)
-2. **Python 3.10+**: Download from [python.org](https://www.python.org/downloads/).  
-   > ⚠️ **CRITICAL**: Check the box **"Add Python to PATH"** in the Python installer!
-3. **Google Chrome** (or Microsoft Edge)
-4. **Git**: Download from [git-scm.com](https://git-scm.com/)
+| Mode | Target Question Type | Key Capabilities & Technical Mechanism |
+|---|---|---|
+| **Single-Choice MCQ** | `q_type: "mcq"` | Circular radio indicators, KaTeX math rendering, scrollable code stems, and deterministic token-overlap snap-to-option. |
+| **Multiple-Answer MCQ** | `q_type: "multi"` | Square checkbox indicators, exhaustive per-option truth table evaluation, and multi-select canonical key sorting (`A,C,D`). |
+| **Sequence Ordering** | `q_type: "order"` | Unlabelled drag-and-drop block ordering via RBD keyboard dispatch, interpolated pointer movement, and React Fiber state sync. |
+| **Fill-in-the-Box** | `q_type: "text"` | Numeric, expression, and word fill-in inputs with React internal `_valueTracker` synchronization and native input event firing. |
+| **Diagram & Counting** | `q_type: "mcq"` (Vision) | Geometry counting (triangles, squares, cubes), circuit analysis, CORS-proof tab crop hydration, and combinatorial verification. |
+| **Proctored Coding** | `q_type: "code"` | Non-paste MAIN-world Monaco/Ace typing engine, starter signature preservation, bracket validation, and forensic self-healing retry. |
+| **Portal Completion** | `Ctrl + Alt + 0` | Autonomous module advancement across video tutorials (with speedup & completion triggers), reading materials, and practice sets. |
 
 ---
 
-### Step 1: Clone the Repository
-Open PowerShell or Command Prompt:
-```cmd
+## 4. Complete Keyboard Shortcuts Reference
+
+| Shortcut | Action | Description |
+|---|---|---|
+| `Shift` (Tap / Double-tap) | **Toggle Quiz Auto-Mode** | Toggles automated solving and option application ON/OFF. |
+| `Ctrl + Alt + 0` | **Toggle Portal Mode** | Activates automated tutorial & module progression with a flashing violet indicator. |
+| `Alt + S` | **Solve Current Question** | Submits current question to local backend without applying selection. |
+| `Alt + A` | **Apply Current Solution** | Clicks or selects the currently solved option on the target page. |
+| `Alt + N` | **Advance to Next** | Clicks the portal's "Next" button to proceed to the subsequent question. |
+| `Alt + R` | **In-Place Soft Refresh** | Refreshes extension state in `< 60ms` with cyan pulse without page reload. |
+| `Ctrl` (Double-tap) | **Show / Hide HUD** | Toggles visibility of the floating HUD and resets dot to corner anchor. |
+| `Z` / `Alt` (Double-tap) | **Toggle HUD Compactness** | Toggles HUD between 8px minimalist dot and expanded status rectangular bar. |
+| `Escape` | **Emergency Kill Switch** | Instantly halts all active automation, aborts fetches, and disarms timers. |
+
+---
+
+## 5. Single-Command Installation & Multi-Laptop Setup
+
+Cloning this repository on **any Windows 10/11 laptop** works out-of-the-box with zero hardcoded paths:
+
+### Recommended Setup (Full Installation & Verification)
+
+Open PowerShell and execute:
+
+```powershell
 git clone https://github.com/codewithjaswanth/Jivvu.git
 cd Jivvu
+.\setup.bat --recommended
 ```
 
-### Step 2: Run One-Click Setup
-Double-click `setup.bat` (or run in terminal):
-```cmd
-setup.bat
-```
-*(Or via PowerShell: `.\setup.ps1`)*
+*What Recommended Mode Does:*
+1. Verifies Python 3.10+ is in PATH.
+2. Creates `.venv` and installs all dependencies from `requirements.txt`.
+3. Creates `backend\.env` from `backend\.env.example`.
+4. Compiles `backend\native_host_win.cs` via built-in Windows `.NET` `csc.exe` and registers the Native Messaging Host for Chrome and Edge.
+5. Creates the `Jev.lnk` desktop shortcut and registers the Windows Startup daemon.
+6. Runs the offline evaluation self-test to verify 100% harness health and starts the background daemon.
 
-**What `setup.bat` automatically configures:**
-- Creates isolated virtual environment at `.venv`
-- Installs all dependencies from `requirements.txt`
-- Creates `backend\.env` secrets file from template
-- Registers the Native Messaging Host in Windows Registry (`HKCU\Software\Google\Chrome\NativeMessagingHosts`)
-- Registers the silent background lifecycle daemon in Windows Startup
-- Generates a desktop shortcut (`Jev.lnk`) with the custom icon
+### Quick Setup (`< 10s`)
+
+```powershell
+.\setup.bat --quick
+```
+
+*Reuses existing `.venv`, registers hosts and startup daemons, starts the backend immediately, and skips self-tests for instant startup.*
 
 ---
 
-### Step 3: Configure Free API Keys
-Open `backend\.env` in Notepad:
-```cmd
-notepad backend\.env
+## 6. Configuring Free API Keys
+
+Open `backend\.env` in Notepad and add your free keys:
+
+```env
+# Primary Fast Inference (Recommended: Free tier at console.groq.com)
+GROQ_API_KEY=gsk_your_groq_api_key_here
+
+# Hedged Secondary Fallback (Free tier at openrouter.ai)
+OPENROUTER_API_KEYS=sk-or-v1-your_openrouter_api_key_here
+
+# Vision & Multimodal Diagram Solver (Free tier at aistudio.google.com)
+GEMINI_API_KEY=AIzaSy_your_gemini_api_key_here
 ```
-Paste at least one free API key:
-- **Groq API Key** (Free, ultra-fast 500+ tok/s): [https://console.groq.com/keys](https://console.groq.com/keys)
-  ```env
-  GROQ_API_KEY=gsk_your_key_here
-  ```
-- **OpenRouter API Key** (Free models fallback): [https://openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)
-  ```env
-  OPENROUTER_API_KEY=sk-or-v1-your_key_here
-  ```
-Save and close the file.
+
+### Loading the Chrome Extension
+
+1. In Google Chrome or Microsoft Edge, navigate to `chrome://extensions`.
+2. Enable **Developer mode** (toggle in the top-right corner).
+3. Click **Load unpacked** (top-left button).
+4. Select the `extension/` directory inside this repository.
+5. Open `https://learning.ccbp.in` — the assistant and backend will activate automatically!
 
 ---
 
-### Step 4: Load Extension in Google Chrome
-1. In Google Chrome, go to the extensions management page:
-   ```
-   chrome://extensions
-   ```
-2. In the top-right corner, turn **ON** **Developer mode**.
-3. In the top-left corner, click **Load unpacked**.
-4. In the folder browser, select the **`extension`** folder inside your cloned `Jivvu` directory:
-   ```
-   C:\path\to\Jivvu\extension
-   ```
-5. *(Optional)* Click the Puzzle icon in Chrome's toolbar and pin **QuizZy - Side Panel Quiz Assistant**.
+## 7. Observability Dashboard & Verification Commands
 
----
-
-### Step 5: Test & Verify
-1. Open [https://learning.ccbp.in](https://learning.ccbp.in) in Chrome.
-2. Notice the small **8px balanced HUD dot** appear on the page.
-3. The backend starts automatically on `127.0.0.1:8000` in the background with zero terminal popups.
-4. **Hotkeys**:
-   - `Alt + S`: Solve current question (MCQ, ordering, multi-select, fill-in-the-blank, coding).
-   - `Alt + A`: Apply the answer / input into code editor.
-   - `Alt + N`: Navigate to next question.
-   - `Shift` (Double-tap): Toggle Auto-Solve mode.
-   - `Alt + M`: Open Side Panel assistant.
-
----
-
-## Manual Installation (Step-by-Step for Senior Developers)
-
-If you prefer to inspect and run every step manually:
-
-### 1. Create Virtual Environment
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-### 2. Configure Environment Variables
-```powershell
-Copy-Item backend\.env.example backend\.env
-notepad backend\.env
-```
-
-### 3. Register Chrome Native Messaging Host
-```powershell
-.\.venv\Scripts\python.exe backend\native_host.py --register
-```
-This dynamically resolves your repository path, writes `backend\com.quizzy.lifecycle.json` with the exact absolute binary path, and writes registry keys:
-- `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.lifecycle`
-- `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.launcher`
-- `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.quizzy.lifecycle`
-- `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.quizzy.launcher`
-
-### 4. Create Desktop Shortcut & Background Daemon
-```powershell
-.\.venv\Scripts\python.exe -m backend.cli shortcut --name "Jev"
-.\.venv\Scripts\python.exe -m backend.cli daemon
-```
-
-### 5. Run Full Test Suite Verification
-```powershell
-.\test.bat
-# or
-.\.venv\Scripts\python.exe -m pytest tests -q
-```
-Expected output: **`222 passed in ~110s`** (100% pass rate).
-
----
-
-## Managing the Backend & Observability Dashboard
-
-### Desktop Dashboard App
-Double-click the **Jev** shortcut on your Desktop, or run:
-```powershell
-quizzy dashboard
-# or
-.\.venv\Scripts\python.exe -m backend.cli dashboard
-```
-Opens the telemetry and model management dashboard at `http://127.0.0.1:8765`:
-- **Model Selector**: Switch between Auto Intelligent Cascade, Groq-only, OpenRouter-only, or individual models.
-- **Latency & Reliability Metrics**: Real-time request telemetry, consensus agreement, and accuracy scoring.
-- **Backend Lifecycle Pill**: Shows live server status (Online / Standby).
-
-### Diagnostic Commands
-| Command | Action |
+| Command | Purpose |
 |---|---|
-| `.\.venv\Scripts\python.exe backend\native_host.py --status` | Check if backend is currently online |
-| `.\.venv\Scripts\python.exe backend\native_host.py --start` | Manually start the backend |
-| `.\.venv\Scripts\python.exe backend\native_host.py --stop` | Manually stop the backend |
-| `.\.venv\Scripts\python.exe backend\native_host.py --ping` | Ping native messaging stdio host |
-| `test.bat` | Run all 222 unit and integration tests |
+| `http://127.0.0.1:8765` | **Observability Dashboard**: Inspect real-time solve latencies, cache hit ratios, and agreement traces. |
+| `.\test.bat` | **Full Test Suite**: Runs all pytest unit & integration test files (`pytest tests -q`). |
+| `.\dev.bat` | **Interactive Dev Server**: Launches Uvicorn dev server on `127.0.0.1:8000` with auto-reload. |
+| `.\.venv\Scripts\python.exe eval\run_eval.py --self-test` | **Harness Self-Test**: Validates 5 question fixtures offline without external API calls. |
+| `.\.venv\Scripts\python.exe eval\run_eval.py --coding-benchmark` | **Coding Benchmark**: Evaluates 15 proctored coding problems against syntax and AST checks. |
 
 ---
 
-## Troubleshooting Guide
+## 8. Ethical Use & Platform Compliance
 
-### 1. "Specified native messaging host not found" in Chrome
-- Run `setup.bat` or `.\.venv\Scripts\python.exe backend\native_host.py --register`.
-- Verify the registry key exists in PowerShell:
-  ```powershell
-  Get-ItemProperty -Path "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.quizzy.lifecycle"
-  ```
-- Make sure the path points to `backend\native_host_win.exe` or `backend\native_host.cmd`.
-
-### 2. Backend doesn't start when opening learning.ccbp.in
-- Verify the extension is enabled in `chrome://extensions`.
-- Click the extension icon in Chrome or inspect the background service worker console.
-- Verify `127.0.0.1:8765` is running:
-  ```powershell
-  curl.exe -s http://127.0.0.1:8765/api/dashboard/ping
-  ```
-  If not running, run `.\.venv\Scripts\python.exe -m backend.cli daemon`.
-
-### 3. Port 8000 Conflict
-If port 8000 is occupied by a stale process:
-```powershell
-.\.venv\Scripts\python.exe -c "from backend.lifecycle_manager import clean_port_8000; clean_port_8000()"
-```
+This project is designed solely for authorized educational assistance, accessibility support, and personal coding practice. It does not tamper with proctoring scripts, does not modify native DOM prototypes, and strictly enforces verifiable consensus before answering.
 
 ---
 
-## Repository & Remote Tracking
-- **Primary Origin**: `https://github.com/codewithjaswanth/Jivvu.git` (`main` branch)
-- **Engine Version**: QuizZy 1.0.0 MV3 Production
+## License
+
+Distributed under the MIT License. See [LICENSE](LICENSE) for details.

@@ -22,12 +22,16 @@ from backend.core.key_pool import (
     get_model_cooldown_remaining,
     get_next_groq_key,
     get_ordered_fallback_pool,
+    is_key_model_quarantined,
     is_valid_chat_model,
     load_api_keys,
     load_models_config,
     quarantine_key,
     quarantine_model,
+    record_model_usage,
+    record_rate_limit_headers,
     reset_model_cooldown,
+    set_key_model_quarantine,
     set_model_cooldown,
     set_provider_cooldown,
 )
@@ -53,6 +57,36 @@ class ModelResponse(BaseModel):
     reason: str = ""
     raw_text: str = ""
     norm: Optional[Any] = None
+
+
+_shared_client_pool: Dict[Any, httpx.AsyncClient] = {}
+
+
+def get_shared_async_client() -> httpx.AsyncClient:
+    """
+    Returns a reusable per-event-loop httpx.AsyncClient with persistent keep-alive pool.
+    Re-uses TCP/TLS connections to avoid 150-300ms handshake overhead on every call.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        client = _shared_client_pool.get(loop)
+        if client is not None and not getattr(client, "is_closed", False):
+            return client
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=40),
+            timeout=httpx.Timeout(connect=2.0, read=3.5, write=2.0, pool=2.0),
+        )
+        _shared_client_pool[loop] = client
+        return client
+
+    return httpx.AsyncClient(
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=40),
+        timeout=httpx.Timeout(connect=2.0, read=3.5, write=2.0, pool=2.0),
+    )
 
 
 async def call_single_completion(
@@ -84,9 +118,15 @@ async def call_single_completion(
         effective_model = "qwen/qwen3.8-27b"
 
     is_reasoning_model = any(k in effective_model.lower() for k in ("gpt-oss", "qwen", "nemotron"))
+    has_image_content = any(isinstance(m.get("content"), list) for m in messages)
     if "qwen3.8" in effective_model.lower() and provider == "groq":
-        # Groq enforces a strict 1000 OTPM limit on qwen/qwen3.8-27b; cap max_tokens so expected output never triggers HTTP 429 OTPM rejection
-        effective_max_tokens = 480 if max_tokens <= 1536 else 768
+        # Groq enforces a strict 1000 OTPM limit on qwen/qwen3.8-27b; cap max_tokens at 320 for non-coding text, 480 for vision
+        if has_image_content:
+            effective_max_tokens = min(max_tokens, 480)
+        elif max_tokens > 1536:
+            effective_max_tokens = 768
+        else:
+            effective_max_tokens = min(max_tokens, 320)
     elif is_reasoning_model:
         effective_max_tokens = max(max_tokens, 2048) if ("qwen" in effective_model.lower() or "nemotron" in effective_model.lower() or max_tokens > 1024) else max(max_tokens, 1024)
     else:
@@ -98,7 +138,6 @@ async def call_single_completion(
         or (provider == "groq" and any(k in effective_model.lower() for k in ("vision", "scout", "maverick", "qwen")))
     )
 
-    has_image_content = any(isinstance(m.get("content"), list) for m in messages)
     if has_image_content and is_multimodal:
         timeout_sec = min(10.0, max(8.0, timeout_ms / 1000.0))
 
@@ -162,8 +201,12 @@ async def call_single_completion(
     _q_key = _dispatch("quarantine_key", quarantine_key)
     _set_m_cd = _dispatch("set_model_cooldown", set_model_cooldown)
     _set_p_cd = _dispatch("set_provider_cooldown", set_provider_cooldown)
+    _rec_usage = _dispatch("record_model_usage", record_model_usage)
+    _rec_headers = _dispatch("record_rate_limit_headers", record_rate_limit_headers)
+    _set_km_q = _dispatch("set_key_model_quarantine", set_key_model_quarantine)
 
     try:
+        _rec_usage(provider, api_key, effective_model)
         response = await asyncio.wait_for(
             client.post(
                 url,
@@ -174,6 +217,7 @@ async def call_single_completion(
             timeout=max(0.5, timeout_sec + 1.0),
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        _rec_headers(provider, api_key, effective_model, getattr(response, "headers", {}))
 
         if response.status_code == 200:
             data = response.json()
@@ -194,20 +238,56 @@ async def call_single_completion(
         elif response.status_code == 429:
             retry_after_hdr = response.headers.get("retry-after")
             try:
-                retry_after_sec = float(retry_after_hdr) if retry_after_hdr else 10.0
+                retry_after_sec = float(retry_after_hdr) if retry_after_hdr else 12.0
             except ValueError:
-                retry_after_sec = 10.0
+                retry_after_sec = 12.0
 
             if provider == "groq":
                 is_daily_limit = retry_after_sec > 30.0 or any(
                     k in response.text.lower() for k in ("tokens per day", "(tpd)", "requests per day", "(rpd)")
                 )
-                if is_daily_limit:
-                    _set_m_cd("groq", model, min(retry_after_sec, 600.0))
-                else:
-                    _set_m_cd("groq", model, min(retry_after_sec, 2.0))
+                duration = min(retry_after_sec, 600.0) if is_daily_limit else max(12.0, retry_after_sec)
+                _set_km_q(api_key, model, duration)
+                groq_keys = _healthy_gk_fn()
+                if not groq_keys or all(is_key_model_quarantined(k, model) for k in groq_keys):
+                    _set_m_cd("groq", model, duration)
+
+                # Fast < 5ms fallback to alternate model bucket in Groq
+                fallback_map = {
+                    "openai/gpt-oss-120b": "llama-3.3-70b-versatile",
+                    "llama-3.3-70b-versatile": "openai/gpt-oss-20b",
+                    "openai/gpt-oss-20b": "qwen/qwen3.8-27b",
+                    "qwen/qwen3.8-27b": "openai/gpt-oss-120b",
+                }
+                alt_model = fallback_map.get(model)
+                rem_timeout = max(0.1, timeout_sec - (time.perf_counter() - t0))
+                if alt_model and rem_timeout > 0.2:
+                    alt_payload = dict(payload)
+                    alt_payload["model"] = alt_model
+                    if "qwen" in alt_model.lower():
+                        alt_payload["max_tokens"] = 320 if max_tokens <= 1024 else 480
+                    elif "gpt-oss" in alt_model.lower():
+                        alt_payload["max_tokens"] = max(effective_max_tokens, 1024)
+                    try:
+                        alt_resp = await asyncio.wait_for(
+                            client.post(url, headers=headers, json=alt_payload, timeout=rem_timeout),
+                            timeout=max(0.4, rem_timeout + 0.5),
+                        )
+                        if alt_resp.status_code == 200:
+                            alt_data = alt_resp.json()
+                            alt_choices = alt_data.get("choices", [])
+                            if alt_choices and "message" in alt_choices[0]:
+                                alt_msg = alt_choices[0]["message"]
+                                alt_content = alt_msg.get("content") or alt_msg.get("reasoning") or alt_msg.get("reasoning_content") or ""
+                                if str(alt_content).strip():
+                                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                                    return str(alt_content), elapsed_ms, None
+                    except Exception:
+                        pass
             elif provider == "openrouter":
-                _set_m_cd("openrouter", model, min(retry_after_sec, 12.0))
+                duration = max(12.0, retry_after_sec)
+                _set_km_q(api_key, model, duration)
+                _set_m_cd("openrouter", model, duration)
                 _q_mod(model, 30.0)
                 is_provider_wide = any(k in response.text.lower() for k in ("account", "credits", "user rate limit", "insufficient"))
                 if is_provider_wide:
@@ -411,6 +491,8 @@ async def call_groq_primary(
         tried_keys = {api_key}
         for alt_key in healthy_keys:
             if alt_key in tried_keys:
+                continue
+            if is_key_model_quarantined(alt_key, model):
                 continue
             tried_keys.add(alt_key)
             rem_timeout = max(200.0, timeout_ms - el)

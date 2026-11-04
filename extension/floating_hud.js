@@ -851,6 +851,21 @@
       const key = (e.key || "").toLowerCase();
       const code = e.code || "";
 
+      if (key === "r" || code === "KeyR") {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        const isEditable = isEditableElement(e.target) || isEditableElement(activeEl) || isInsideCodeEditor(e.target) || isInsideCodeEditor(activeEl);
+        if (!isEditable) {
+          if (typeof e.preventDefault === "function") e.preventDefault();
+          if (typeof e.stopPropagation === "function") e.stopPropagation();
+          if (typeof softRefreshExtension === "function") {
+            softRefreshExtension();
+          } else if (typeof window !== "undefined" && typeof window.__QUIZZY_SOFT_REFRESH_EXTENSION__ === "function") {
+            window.__QUIZZY_SOFT_REFRESH_EXTENSION__();
+          }
+          return;
+        }
+      }
+
       // Specifically allow Alt+S, Alt+A, Alt+N, Alt+M even when focused inside Monaco's <textarea class="inputarea">
       if (key === "s" || code === "KeyS") {
         if (typeof e.preventDefault === "function") e.preventDefault();
@@ -1851,7 +1866,9 @@
     updateDotState();
     try {
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_STATE_CHANGED", active: portalCompletionActive }).catch(() => {});
+        chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_STATE_CHANGED", active: portalCompletionActive }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) {}
+        });
       }
     } catch (_) {}
     return portalCompletionActive;
@@ -2527,7 +2544,13 @@
         if (isRateLimited) {
           if (answerText) {
             answerText.className = "hud-answer-text uncertain";
-            answerText.textContent = "Rate limit cooldown (10s)...";
+            answerText.textContent = "Groq Rate Limit: Backing off 2.5s...";
+            answerText.title = "Groq Rate Limit: Backing off 2.5s...";
+          }
+          if (hudDot) {
+            hudDot.style.background = "#f59e0b";
+            hudDot.title = "Groq Rate Limit: Backing off 2.5s...";
+            setTimeout(() => updateDotState(), 2500);
           }
           if (isAutoRunning) {
             autoErrorOccurred = false;
@@ -2537,7 +2560,7 @@
               if (isAutoRunning) {
                 runAutoStep();
               }
-            }, 10000);
+            }, 2500);
             return;
           }
         }
@@ -2560,6 +2583,31 @@
       }
 
       backendOnline = true;
+      if (res.data && res.data.status === "UNCERTAIN" && res.data.confidence_tier === "RATE_LIMIT_EXHAUSTED") {
+        isSolving = false;
+        if (answerText) {
+          answerText.className = "hud-answer-text uncertain";
+          answerText.textContent = "Groq Rate Limit: Backing off 2.5s...";
+          answerText.title = "Groq Rate Limit: Backing off 2.5s...";
+        }
+        if (hudDot) {
+          hudDot.style.background = "#f59e0b";
+          hudDot.title = "Groq Rate Limit: Backing off 2.5s...";
+          setTimeout(() => updateDotState(), 2500);
+        }
+        if (isAutoRunning) {
+          autoErrorOccurred = false;
+          autoErrorMessage = "Rate limit cooldown";
+          updateDotState();
+          setTimeout(() => {
+            if (isAutoRunning) {
+              runAutoStep();
+            }
+          }, 2500);
+          return;
+        }
+      }
+
       lastSolvedSignature = currentSig;
       lastSolvedTime = Date.now();
       if (!isAutoRunning && manualSolvePendingAdvance) {
@@ -2615,18 +2663,21 @@
       q_type: qType,
       targetIndex,
       selected_index: targetIndex,
+      selected_indices: solveData.selected_indices || solveData.selectedIndices,
+      selectedIndices: solveData.selected_indices || solveData.selectedIndices,
       targetText,
       selected_text: targetText,
+      selected_texts: solveData.selected_texts || solveData.selectedTexts,
+      selectedTexts: solveData.selected_texts || solveData.selectedTexts,
       answer: (qType === "mcq" && targetText) ? targetText : solveData.answer,
       letter,
       ordered_indices: solveData.ordered_indices,
       ordered_texts: solveData.ordered_texts,
       target_permutation: solveData.ordered_indices,
       permutation_indices: solveData.permutation_indices,
-      selected_indices: solveData.selected_indices,
-      selected_texts: solveData.selected_texts,
-      canonical_keys: solveData.canonical_keys,
-      canonical_key: solveData.canonical_key,
+      canonical_keys: solveData.canonical_keys || solveData.canonicalKeys,
+      canonicalKeys: solveData.canonical_keys || solveData.canonicalKeys,
+      canonical_key: solveData.canonical_key || solveData.canonicalKey,
       options: (extracted && Array.isArray(extracted.options)) ? extracted.options : [],
       optionSelectors: (extracted && Array.isArray(extracted.optionSelectors)) ? extracted.optionSelectors : [],
       dragHandleSelectors: (extracted && Array.isArray(extracted.dragHandleSelectors)) ? extracted.dragHandleSelectors : []
@@ -2744,6 +2795,106 @@
     resetQuestionLifecycleState();
   }
 
+  function softRefreshExtension() {
+    // 1. Abort & recreate active AbortControllers
+    if (activeHudAbortController) {
+      try { activeHudAbortController.abort("SoftRefresh"); } catch (_) {}
+    }
+    activeHudAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+
+    const exec = (typeof window !== "undefined") ? (window.__QuizZyExecutor || window.QuizZyExecutor) : null;
+    if (exec && typeof exec.abortPendingExecution === "function") {
+      try { exec.abortPendingExecution("SoftRefresh"); } catch (_) {}
+    }
+
+    // 2. Stop stuck Auto-Mode or Portal Completion loops cleanly
+    if (isAutoRunning) {
+      stopAutoMode("Extension soft-refreshed via Alt+R");
+    }
+    if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.stop === "function") {
+      try { window.QuizZyPortalCompletion.stop("SoftRefresh"); } catch (_) {}
+    }
+    isSolving = false;
+    solveTimedOut = false;
+    autoErrorOccurred = false;
+    autoRetryCount = 0;
+
+    // 3. Reset question lifecycle, DOM WeakRefs, and extraction snapshots
+    resetQuestionLifecycleState();
+
+    if (typeof window !== "undefined") {
+      window.__QUIZZY_CURRENT_QUESTION_OPTION_SELECTED__ = false;
+      window.__QUIZZY_LAST_SELECTED_OPTION__ = null;
+      window.__QUIZZY_ORDER_VERIFIED__ = false;
+      window.__QUIZZY_ORDER_LOCK__ = false;
+      window.__QUIZZY_MULTI_SELECTION_COMMITTED_SIG__ = null;
+      window.__QUIZZY_LAST_EXTRACTION__ = null;
+      window.__QUIZZY_LAST_OPTION_ELEMENTS__ = [];
+      window.__QUIZZY_LAST_OPTIONS_TEXT__ = [];
+      window.__QUIZZY_CACHED_CONTAINERS__ = null;
+      lastSolvedSignature = "";
+      lastSolvedTime = 0;
+    }
+
+    // 4. Clean residual highlight classes/attributes
+    if (typeof document !== "undefined") {
+      try {
+        const highlighted = document.querySelectorAll("[data-quizzy-highlight], [data-quizzy-selected], [data-quizzy-multi-checked], .quizzy-optin-winner");
+        highlighted.forEach((el) => {
+          try { el.removeAttribute("data-quizzy-highlight"); } catch (_) {}
+          try { el.removeAttribute("data-quizzy-selected"); } catch (_) {}
+          try { el.removeAttribute("data-quizzy-multi-checked"); } catch (_) {}
+          if (el.classList) {
+            try { el.classList.remove("quizzy-optin-winner"); } catch (_) {}
+          }
+          if (el.style) {
+            el.style.outline = "";
+            el.style.outlineOffset = "";
+          }
+        });
+      } catch (_) {}
+    }
+
+    // 5. Visual confirmation: Flash dot cyan (#06b6d4) for 450ms or show "Refreshed" on HUD bar
+    if (wrapper) {
+      resetDotPositionToCorner(wrapper);
+    }
+    if (miniDot) {
+      const prevBg = miniDot.style.background;
+      const prevBoxShadow = miniDot.style.boxShadow;
+      miniDot.style.background = "#06b6d4";
+      miniDot.style.boxShadow = "0 0 10px #06b6d4";
+      setTimeout(() => {
+        miniDot.style.background = prevBg;
+        miniDot.style.boxShadow = prevBoxShadow;
+        updateDotState();
+      }, 450);
+    }
+    if (answerText) {
+      const prevText = answerText.textContent;
+      const prevClass = answerText.className;
+      answerText.className = "hud-answer-text online";
+      answerText.textContent = "Refreshed";
+      setTimeout(() => {
+        if (answerText.textContent === "Refreshed") {
+          answerText.textContent = prevText || "Ready";
+          answerText.className = prevClass;
+        }
+      }, 450);
+    }
+
+    // 6. Notify background service worker & reset backend state
+    if (isExtensionContextValid()) {
+      try {
+        chrome.runtime.sendMessage({ type: "QUIZZY_SOFT_REFRESH_EXTENSION", action: "QUIZZY_SOFT_REFRESH_EXTENSION" }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) {}
+        });
+      } catch (_) {}
+    }
+
+    return { success: true, refreshed: true };
+  }
+
   function recordQuestionSolveForRecycle() {
     questionsSolvedSinceRecycle++;
     if (questionsSolvedSinceRecycle >= getRecycleInterval()) {
@@ -2757,6 +2908,7 @@
     window.__QUIZZY_PERFORM_SOFT_RECYCLE__ = performSoftMemoryRecycle;
     window.__QUIZZY_RECORD_SOLVE_CYCLE__ = recordQuestionSolveForRecycle;
     window.__QUIZZY_GET_SOLVES_SINCE_RECYCLE__ = () => questionsSolvedSinceRecycle;
+    window.__QUIZZY_SOFT_REFRESH_EXTENSION__ = softRefreshExtension;
   }
 
   function clickNextOnPage(callback) {
@@ -2955,16 +3107,16 @@
           autoErrorOccurred = true;
           autoErrorMessage = "Question loading or unparsed";
           updateDotState();
-          if (autoRetryCount < 3) {
+          if (autoRetryCount < 2) {
             autoRetryCount++;
-            const backoffMs = autoRetryCount === 1 ? 400 : (autoRetryCount === 2 ? 1000 : 8000);
-            console.warn(`[QuizZy HUD] Solve failed/empty, retrying in ${backoffMs}ms (${autoRetryCount}/3)...`);
+            const backoffMs = 4000;
+            console.warn(`[QuizZy HUD] Solve failed/empty, backing off ${backoffMs}ms (${autoRetryCount}/2)...`);
             setTimeout(runAutoStep, backoffMs);
             return;
           }
           stepSettled = true;
           autoRetryCount = 0;
-          stopAutoMode("Cannot solve question. Stopped to prevent skipping.");
+          stopAutoMode("Cannot solve question. Stopped after 2 consecutive failures.");
           return;
         }
         return;
@@ -2988,6 +3140,26 @@
       }
 
       const prevSig = getQuestionSig(extracted);
+      const isMulti = (solution && solution.q_type === "multi") || (extracted && extracted.q_type === "multi");
+
+      if (isMulti && typeof window !== "undefined" && window.__QUIZZY_MULTI_SELECTION_COMMITTED_SIG__ && window.__QUIZZY_MULTI_SELECTION_COMMITTED_SIG__ === prevSig) {
+        // Multi-selection already committed for this exact question; skip re-toggle and proceed directly to Submit/Next
+        setTimeout(() => {
+          if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
+          clickNextOnPage((nextRes) => {
+            if (stepSettled || !isAutoRunning || currentEpoch !== autoStepEpoch) return;
+            if (nextRes && nextRes.ok === false && nextRes.error && nextRes.error.includes("NO_OPTION_SELECTED")) {
+              stepSettled = true;
+              autoErrorOccurred = true;
+              autoErrorMessage = "No option selected";
+              updateDotState();
+              stopAutoMode("Cannot submit question: No option selected.");
+              return;
+            }
+          });
+        }, 80);
+        return;
+      }
 
       // Apply answer
       applyCurrentSolution((applyRes) => {
@@ -3008,6 +3180,10 @@
           console.warn("[QuizZy HUD] Selection verification failed. Stopped to prevent incorrect submission.");
           stopAutoMode("Selection error. Stopped to prevent incorrect submission.");
           return;
+        }
+
+        if (isMulti && typeof window !== "undefined") {
+          window.__QUIZZY_MULTI_SELECTION_COMMITTED_SIG__ = prevSig;
         }
 
         // For drag-and-drop ordering questions: proceed to advance so auto mode continues
@@ -3467,6 +3643,16 @@
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const key = (e.key || "").toLowerCase();
       const code = e.code || "";
+      if (key === "r" || code === "KeyR") {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        const isEditable = isEditableElement(e.target) || isEditableElement(activeEl) || isInsideCodeEditor(e.target) || isInsideCodeEditor(activeEl);
+        if (!isEditable) {
+          if (typeof e.preventDefault === "function") e.preventDefault();
+          if (typeof e.stopPropagation === "function") e.stopPropagation();
+          softRefreshExtension();
+          return;
+        }
+      }
       if (key === "s" || code === "KeyS") {
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
@@ -3728,7 +3914,7 @@
           hide();
         }
         if (typeof sendResponse === "function") sendResponse({ success: true, isSidePanelOpen });
-        return true;
+        return;
       }
       if (message.action === "PORTAL_COMPLETION_STATE_CHANGED") {
         portalCompletionActive = Boolean(message.active);
@@ -3762,10 +3948,18 @@
         } else if (cmd === "trigger_next") {
           clickNextOnPage();
           if (typeof sendResponse === "function") sendResponse({ handled: true, success: true });
+        } else if (cmd === "trigger_refresh" || cmd === "soft_refresh") {
+          softRefreshExtension();
+          if (typeof sendResponse === "function") sendResponse({ handled: true, success: true });
         } else {
           if (typeof sendResponse === "function") sendResponse({ handled: false });
         }
-        return true;
+        return;
+      }
+      if (message.action === "QUIZZY_SOFT_REFRESH_EXTENSION" || message.type === "QUIZZY_SOFT_REFRESH_EXTENSION") {
+        softRefreshExtension();
+        if (typeof sendResponse === "function") sendResponse({ success: true, refreshed: true });
+        return;
       }
     });
     }
@@ -3806,6 +4000,7 @@
     hide,
     setMinimized,
     setHidden,
+    softRefresh: softRefreshExtension,
     solve: solveCurrentQuestion,
     apply: applyCurrentSolution,
     next: clickNextOnPage,

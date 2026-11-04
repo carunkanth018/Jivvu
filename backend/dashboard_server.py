@@ -150,6 +150,18 @@ async def serve_dashboard_ui() -> FileResponse:
     return FileResponse(index_file)
 
 
+@app.get("/styles.css")
+async def serve_dashboard_css() -> FileResponse:
+    """Direct root fallback for stylesheet."""
+    return FileResponse(STATIC_DIR / "styles.css")
+
+
+@app.get("/dashboard.js")
+async def serve_dashboard_script() -> FileResponse:
+    """Direct root fallback for client script."""
+    return FileResponse(STATIC_DIR / "dashboard.js")
+
+
 @app.get("/api/dashboard/ping")
 async def ping_dashboard() -> Dict[str, str]:
     """Lightweight readiness check for CLI launcher."""

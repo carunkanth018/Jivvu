@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import json
 import re
@@ -283,6 +284,69 @@ def normalize_code_snippet(text: str) -> str:
     return re.sub(r"\s+", " ", reconstructed).lower().strip()
 
 
+def snap_to_closest_option(candidate: str, options: List[str], min_similarity: float = 0.45) -> Optional[int]:
+    """
+    Deterministic Token-Overlap & SequenceMatcher Snap-to-Option fallback.
+    Used when exact letter, text match, code-snippet match, and numeric equivalence all fail.
+    Tokenizes both candidate and options, computes SequenceMatcher ratio and token overlap,
+    and returns the best option index if unique and score >= min_similarity.
+    """
+    if not candidate or not options:
+        return None
+
+    cand_str = str(candidate).strip()
+    cand_stripped = re.sub(r"^(?:option|choice)?\s*\(?\[?[A-Pa-p0-9]\)?\]?[\.\:\)]?\s*", "", cand_str, flags=re.IGNORECASE).strip()
+    cand_norm = normalize_text_answer(cand_stripped if cand_stripped else cand_str)
+    if not cand_norm:
+        return None
+
+    cand_tokens = set(re.findall(r"\w+", cand_norm))
+    cand_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", cand_str))
+
+    best_idx: Optional[int] = None
+    best_score = -1.0
+    second_best_score = -1.0
+
+    for i, opt in enumerate(options):
+        opt_str = str(opt).strip()
+        opt_stripped = re.sub(r"^(?:option|choice)?\s*\(?\[?[A-Pa-p0-9]\)?\]?[\.\:\)]?\s*", "", opt_str, flags=re.IGNORECASE).strip()
+        opt_norm = normalize_text_answer(opt_stripped if opt_stripped else opt_str)
+        if not opt_norm:
+            continue
+
+        seq_ratio = difflib.SequenceMatcher(None, cand_norm, opt_norm).ratio()
+
+        opt_tokens = set(re.findall(r"\w+", opt_norm))
+        if cand_tokens and opt_tokens:
+            intersection = cand_tokens & opt_tokens
+            union = cand_tokens | opt_tokens
+            jaccard = len(intersection) / len(union) if union else 0.0
+            overlap_ratio = len(intersection) / min(len(cand_tokens), len(opt_tokens))
+        else:
+            jaccard = 0.0
+            overlap_ratio = 0.0
+
+        opt_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", opt_str))
+        number_match = bool(cand_numbers and cand_numbers == opt_numbers)
+
+        score = max(seq_ratio, overlap_ratio * 0.9, jaccard)
+        if number_match and overlap_ratio >= 0.5:
+            score = max(score, 0.85)
+
+        if score > best_score:
+            second_best_score = best_score
+            best_score = score
+            best_idx = i
+        elif score > second_best_score:
+            second_best_score = score
+
+    if best_idx is not None and best_score >= min_similarity:
+        if (best_score - second_best_score >= 0.04) or (best_score >= 0.65):
+            return best_idx
+
+    return None
+
+
 def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswer:
     """
     Normalize an MCQ answer against a list of 2-16 options.
@@ -455,6 +519,17 @@ def normalize_mcq_answer(raw_answer: Any, options: List[str]) -> NormalizedAnswe
                 selected_text=options[idx],
                 raw_answer=raw_answer,
             )
+
+    # Step 7: Deterministic Token-Overlap & SequenceMatcher Snap-to-Option Fallback
+    snap_idx = snap_to_closest_option(raw_str, options)
+    if snap_idx is not None:
+        letter = chr(65 + snap_idx)
+        return NormalizedAnswer(
+            canonical_key=letter,
+            selected_index=snap_idx,
+            selected_text=options[snap_idx],
+            raw_answer=raw_answer,
+        )
 
     raise NormalizationError(
         f"Unable to normalize MCQ answer '{raw_answer}' with valid options {valid_letters}"
@@ -925,9 +1000,15 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
             if found:
                 continue
 
-        # 3. Embedded letters in short label strings (e.g. "Options A and D are correct")
-        # Never match lowercase article 'a' inside full prose sentences
-        letters = re.findall(r"(?:(?:option|choice)s?\s+)?\b([A-P])\b", item_str)
+        # 3. Snap-to-option fallback for paraphrased/hallucinated item text
+        snap_idx = snap_to_closest_option(item_str, options)
+        if snap_idx is not None:
+            matched_indices.add(snap_idx)
+            continue
+
+        # 4. Embedded letters in short label strings (e.g. "Options A and D are correct")
+        # Never match letters followed by + or # (e.g. C++, C#) or lowercase article 'a'
+        letters = re.findall(r"(?:(?:option|choice)s?\s+)?\b([A-P])\b(?![+#])", item_str)
         for l in letters:
             if l.upper() in valid_letters:
                 matched_indices.add(ord(l.upper()) - 65)
@@ -938,6 +1019,12 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
         for l in letters:
             if l.upper() in valid_letters:
                 matched_indices.add(ord(l.upper()) - 65)
+
+    # Fallback: snap whole raw_answer
+    if not matched_indices:
+        snap_idx = snap_to_closest_option(str(raw_answer), options)
+        if snap_idx is not None:
+            matched_indices.add(snap_idx)
 
     if not matched_indices:
         raise NormalizationError(f"Could not extract any valid multi-select options from: {raw_answer!r}")
@@ -950,7 +1037,7 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
     return NormalizedAnswer(
         canonical_key=canonical_key,
         selected_index=sorted_indices[0],
-        selected_text=selected_texts[0],
+        selected_text=", ".join(selected_texts),
         selected_indices=sorted_indices,
         selected_texts=selected_texts,
         canonical_keys=canonical_keys,

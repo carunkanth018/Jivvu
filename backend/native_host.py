@@ -142,25 +142,24 @@ def get_default_origins() -> List[str]:
     # 1. Base manifest key ID
     origins_set.add("fmddjogdlehkodcjihmmmbdblhkmjhia")
 
-    # 2. Canonical and variant repository paths
+    # 2. Canonical and variant repository paths dynamically resolved
+    ext_dir = REPO_ROOT / "extension"
     path_variants = [
-        str(REPO_ROOT / "extension"),
-        str(REPO_ROOT / "extension").lower(),
-        str(REPO_ROOT / "extension").replace("\\", "/"),
-        str(REPO_ROOT / "extension").replace("\\", "/").lower(),
-        r"C:\Users\jassh\Jev\extension",
-        r"c:\Users\jassh\Jev\extension",
-        "C:/Users/jassh/Jev/extension",
-        "c:/Users/jassh/Jev/extension",
-        r"C:\Users\jassh\QuizZy\extension",
-        r"c:\Users\jassh\QuizZy\extension",
-        "C:/Users/jassh/QuizZy/extension",
-        "c:/Users/jassh/QuizZy/extension",
-        r"C:\Users\jassh\Projects\QuizZy\QuizZy\extension",
-        r"c:\Users\jassh\Projects\QuizZy\QuizZy\extension",
-        "C:/Users/jassh/Projects/QuizZy/QuizZy/extension",
-        "c:/Users/jassh/Projects/QuizZy/QuizZy/extension",
+        str(ext_dir),
+        str(ext_dir).lower(),
+        str(ext_dir).replace("\\", "/"),
+        str(ext_dir).replace("\\", "/").lower(),
     ]
+    # Also include parent repository variants if nested
+    for parent in (REPO_ROOT.parent, REPO_ROOT.parent / "QuizZy", REPO_ROOT.parent / "Jev"):
+        parent_ext = parent / "extension"
+        if parent_ext != ext_dir:
+            path_variants.extend([
+                str(parent_ext),
+                str(parent_ext).lower(),
+                str(parent_ext).replace("\\", "/"),
+                str(parent_ext).replace("\\", "/").lower(),
+            ])
 
     for p in path_variants:
         # Chrome on Windows computes IDs via UTF-16LE SHA-256
@@ -204,6 +203,32 @@ def register_host(extra_origins: Optional[List[str]] = None) -> bool:
 
     # 1. Resolve host executable path (prefer compiled windowless native_host_win.exe)
     exe_path = backend_dir / "native_host_win.exe"
+    cs_path = backend_dir / "native_host_win.cs"
+    if not exe_path.is_file() and cs_path.is_file():
+        import subprocess
+        import shutil
+        csc_candidates = [
+            Path(os.environ.get("SystemRoot", r"C:\Windows")) / r"Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+            Path(os.environ.get("SystemRoot", r"C:\Windows")) / r"Microsoft.NET\Framework\v4.0.30319\csc.exe",
+        ]
+        csc_bin = shutil.which("csc.exe") or shutil.which("csc")
+        if csc_bin:
+            csc_candidates.insert(0, Path(csc_bin))
+
+        for csc in csc_candidates:
+            if csc.is_file():
+                try:
+                    subprocess.run(
+                        [str(csc), "/nologo", "/target:winexe", f"/out:{exe_path}", str(cs_path)],
+                        check=True,
+                        capture_output=True,
+                    )
+                    if exe_path.is_file():
+                        print(f"[OK] Compiled native host executable: {exe_path}")
+                        break
+                except Exception as comp_err:
+                    print(f"[WARN] Failed to compile native_host_win.cs via {csc}: {comp_err}")
+
     if exe_path.is_file():
         target_path = str(exe_path)
     else:
@@ -234,24 +259,30 @@ def register_host(extra_origins: Optional[List[str]] = None) -> bool:
     }
     json_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
+    # 3. Synchronize backend/com.quizzy.launcher.json
+    backend_launcher_json = backend_dir / "com.quizzy.launcher.json"
+    launcher_data = {
+        "name": "com.quizzy.launcher",
+        "description": "QuizZy Local Backend Launcher Native Messaging Host",
+        "path": target_path,
+        "type": "stdio",
+        "allowed_origins": origins,
+    }
+    backend_launcher_json.write_text(json.dumps(launcher_data, indent=2), encoding="utf-8")
+
     # 4. Synchronize native_host/com.quizzy.launcher.json for backward compatibility
     legacy_dir = REPO_ROOT / "native_host"
     if legacy_dir.is_dir():
         legacy_manifest_path = legacy_dir / "com.quizzy.launcher.json"
-        legacy_data = {
-            "name": "com.quizzy.launcher",
-            "description": "QuizZy Local Backend Launcher Native Messaging Host",
-            "path": target_path,
-            "type": "stdio",
-            "allowed_origins": origins,
-        }
-        legacy_manifest_path.write_text(json.dumps(legacy_data, indent=2), encoding="utf-8")
+        legacy_manifest_path.write_text(json.dumps(launcher_data, indent=2), encoding="utf-8")
 
-    # 5. Register both hosts in Windows Registry (HKCU)
+    # 5. Register hosts in Windows Registry (HKCU)
     hosts_to_register = [
         (HOST_NAME, json_path),
-        ("com.quizzy.launcher", REPO_ROOT / "native_host" / "com.quizzy.launcher.json"),
+        ("com.quizzy.launcher", backend_launcher_json),
     ]
+    if legacy_dir.is_dir():
+        hosts_to_register.append(("com.quizzy.launcher", REPO_ROOT / "native_host" / "com.quizzy.launcher.json"))
 
     reg_targets = [
         r"Software\Google\Chrome\NativeMessagingHosts",

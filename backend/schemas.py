@@ -29,7 +29,33 @@ class SolveRequest(BaseModel):
         if not isinstance(data, dict):
             return data
 
-        # 1. Normalize aliases for question stem
+        # 0. Default missing or empty subject to "General"
+        subj = data.get("subject")
+        if subj is None or not str(subj).strip():
+            data["subject"] = "General"
+        else:
+            data["subject"] = str(subj).strip()[:100]
+
+        # 1. Normalize image_data, image_url, and compute image_hash first for fallback check
+        img_url = data.get("image_url") or data.get("img_url")
+        if img_url and isinstance(img_url, str) and img_url.strip():
+            data["image_url"] = img_url.strip()
+
+        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
+        if img and isinstance(img, str) and img.strip():
+            data["image_data"] = img.strip()
+        elif "images" in data and isinstance(data["images"], list) and data["images"]:
+            first_img = str(data["images"][0]).strip()
+            if first_img:
+                data["image_data"] = first_img
+        elif data.get("image_url"):
+            data["image_data"] = data["image_url"]
+
+        if data.get("image_data"):
+            import hashlib
+            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
+
+        # 2. Normalize aliases for question stem
         stem = ""
         for key in ("question", "stem", "question_text", "prompt", "text"):
             val = data.get(key)
@@ -38,10 +64,19 @@ class SolveRequest(BaseModel):
                 if cleaned:
                     stem = cleaned
                     break
+
+        # Fallback stem if question is blank but starter_code or image is present
+        has_starter_code = bool(data.get("starter_code") and str(data.get("starter_code")).strip())
+        has_diagram = bool(data.get("image_data") or data.get("image_url"))
+        if not stem and (has_starter_code or has_diagram):
+            stem = "Solve the given problem based on the provided code or diagram."
+
         data["question"] = stem
 
-        # 2. Normalize options: extract text from dicts/objects and filter empty
-        raw_options = data.get("options", [])
+        # 3. Normalize options: coerce None to [], coerce int/float to str, strip empty/whitespace-only
+        raw_options = data.get("options")
+        if raw_options is None:
+            raw_options = []
         clean_options: List[str] = []
         if isinstance(raw_options, list):
             for opt in raw_options:
@@ -60,40 +95,35 @@ class SolveRequest(BaseModel):
                 clean_options.append(cleaned_opt)
         data["options"] = clean_options
 
-        # 3. Determine q_type
+        # 4. Determine q_type with case-insensitive normalization and alias mapping
         raw_q_type = data.get("q_type")
         q_type_str = str(raw_q_type).strip().lower() if raw_q_type is not None else ""
+        type_aliases = {
+            "mcq": "mcq",
+            "multiple": "multi",
+            "multi": "multi",
+            "multi_choice": "multi",
+            "multiselect": "multi",
+            "ordering": "order",
+            "order": "order",
+            "fill": "text",
+            "text": "text",
+            "coding": "code",
+            "code": "code",
+        }
+        q_type_str = type_aliases.get(q_type_str, q_type_str)
         if not q_type_str or q_type_str == "auto":
             q_type_str = "mcq"
 
-        # 4. Handle empty stem and empty options
+        # 5. Handle empty stem and empty options
         if not stem and not clean_options:
             raise ValueError("No question text or options detected on page")
 
-        # 5. Auto-coerce mcq to text if options are empty but stem is non-empty
+        # 6. Auto-coerce mcq to text if options are empty but stem is non-empty
         if q_type_str == "mcq" and len(clean_options) == 0 and stem:
             q_type_str = "text"
 
         data["q_type"] = q_type_str
-
-        # 6. Normalize image_data, image_url, and compute image_hash
-        img_url = data.get("image_url") or data.get("img_url")
-        if img_url and isinstance(img_url, str) and img_url.strip():
-            data["image_url"] = img_url.strip()
-
-        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
-        if img and isinstance(img, str) and img.strip():
-            data["image_data"] = img.strip()
-        elif "images" in data and isinstance(data["images"], list) and data["images"]:
-            first_img = str(data["images"][0]).strip()
-            if first_img:
-                data["image_data"] = first_img
-        elif data.get("image_url"):
-            data["image_data"] = data["image_url"]
-
-        if data.get("image_data"):
-            import hashlib
-            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
 
         return data
 
@@ -149,6 +179,24 @@ class SolveResponse(BaseModel):
     error: Optional[str] = None
     image_hash: Optional[str] = None
 
+    @field_validator("answer", mode="before")
+    @classmethod
+    def coerce_answer_to_str(cls, v: Any) -> str:
+        if isinstance(v, (list, tuple)):
+            return ", ".join(str(x).strip() for x in v if str(x).strip())
+        return str(v) if v is not None else ""
+
+    @field_validator("canonical_keys", mode="before")
+    @classmethod
+    def coerce_canonical_keys_to_list(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [k.strip() for k in v.split(",") if k.strip()]
+        if isinstance(v, (list, tuple)):
+            return [str(k).strip() for k in v if str(k).strip()]
+        return None
+
 
 class HealthResponse(BaseModel):
     """Response schema for GET /health."""
@@ -196,7 +244,33 @@ class FeedbackRequest(BaseModel):
         if not isinstance(data, dict):
             return data
 
-        # 1. Normalize aliases for question stem
+        # 0. Default missing or empty subject to "General"
+        subj = data.get("subject")
+        if subj is None or not str(subj).strip():
+            data["subject"] = "General"
+        else:
+            data["subject"] = str(subj).strip()[:100]
+
+        # 1. Normalize image_data, image_url, and compute image_hash first for fallback check
+        img_url = data.get("image_url") or data.get("img_url")
+        if img_url and isinstance(img_url, str) and img_url.strip():
+            data["image_url"] = img_url.strip()
+
+        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
+        if img and isinstance(img, str) and img.strip():
+            data["image_data"] = img.strip()
+        elif "images" in data and isinstance(data["images"], list) and data["images"]:
+            first_img = str(data["images"][0]).strip()
+            if first_img:
+                data["image_data"] = first_img
+        elif data.get("image_url"):
+            data["image_data"] = data["image_url"]
+
+        if data.get("image_data"):
+            import hashlib
+            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
+
+        # 2. Normalize aliases for question stem
         stem = ""
         for key in ("question", "stem", "question_text", "prompt", "text"):
             val = data.get(key)
@@ -205,10 +279,19 @@ class FeedbackRequest(BaseModel):
                 if cleaned:
                     stem = cleaned
                     break
+
+        # Fallback stem if question is blank but starter_code or image is present
+        has_starter_code = bool(data.get("starter_code") and str(data.get("starter_code")).strip())
+        has_diagram = bool(data.get("image_data") or data.get("image_url"))
+        if not stem and (has_starter_code or has_diagram):
+            stem = "Solve the given problem based on the provided code or diagram."
+
         data["question"] = stem
 
-        # 2. Normalize options: extract text from dicts/objects and filter empty
-        raw_options = data.get("options", [])
+        # 3. Normalize options: coerce None to [], coerce int/float to str, strip empty/whitespace-only
+        raw_options = data.get("options")
+        if raw_options is None:
+            raw_options = []
         clean_options: List[str] = []
         if isinstance(raw_options, list):
             for opt in raw_options:
@@ -227,40 +310,35 @@ class FeedbackRequest(BaseModel):
                 clean_options.append(cleaned_opt)
         data["options"] = clean_options
 
-        # 3. Determine q_type
+        # 4. Determine q_type with case-insensitive normalization and alias mapping
         raw_q_type = data.get("q_type")
         q_type_str = str(raw_q_type).strip().lower() if raw_q_type is not None else ""
+        type_aliases = {
+            "mcq": "mcq",
+            "multiple": "multi",
+            "multi": "multi",
+            "multi_choice": "multi",
+            "multiselect": "multi",
+            "ordering": "order",
+            "order": "order",
+            "fill": "text",
+            "text": "text",
+            "coding": "code",
+            "code": "code",
+        }
+        q_type_str = type_aliases.get(q_type_str, q_type_str)
         if not q_type_str or q_type_str == "auto":
             q_type_str = "mcq"
 
-        # 4. Handle empty stem and empty options
+        # 5. Handle empty stem and empty options
         if not stem and not clean_options:
             raise ValueError("No question text or options detected on page")
 
-        # 5. Auto-coerce mcq to text if options are empty but stem is non-empty
+        # 6. Auto-coerce mcq to text if options are empty but stem is non-empty
         if q_type_str == "mcq" and len(clean_options) == 0 and stem:
             q_type_str = "text"
 
         data["q_type"] = q_type_str
-
-        # 6. Normalize image_data, image_url, and compute image_hash
-        img_url = data.get("image_url") or data.get("img_url")
-        if img_url and isinstance(img_url, str) and img_url.strip():
-            data["image_url"] = img_url.strip()
-
-        img = data.get("image_data") or data.get("image") or data.get("img") or data.get("diagram")
-        if img and isinstance(img, str) and img.strip():
-            data["image_data"] = img.strip()
-        elif "images" in data and isinstance(data["images"], list) and data["images"]:
-            first_img = str(data["images"][0]).strip()
-            if first_img:
-                data["image_data"] = first_img
-        elif data.get("image_url"):
-            data["image_data"] = data["image_url"]
-
-        if data.get("image_data"):
-            import hashlib
-            data["image_hash"] = hashlib.sha256(data["image_data"].encode("utf-8")).hexdigest()[:16]
 
         return data
 

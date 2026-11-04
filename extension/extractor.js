@@ -1624,6 +1624,15 @@
         }
       }
 
+      // Preformatted / multi-line code blocks: preserve \n line breaks strictly so comments never swallow code
+      if (tag === "pre" || (tag === "code" && (node.textContent || "").includes("\n"))) {
+        const codeLines = (node.textContent || node.innerText || "")
+          .replace(/[\u200B-\u200D\uFEFF]/g, "")
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n");
+        return "\n" + codeLines + "\n";
+      }
+
       // Skip radio/checkbox inputs from contributing raw value text
       if (tag === "input" && (node.type === "radio" || node.type === "checkbox")) {
         return "";
@@ -1714,11 +1723,23 @@
     }
 
     const rawWalk = walk(el);
-    if (preserveWhitespace) {
-      return String(rawWalk)
+    const tag = (el.tagName || "").toLowerCase();
+    const hasCode = preserveWhitespace ||
+      (tag === "pre" || tag === "code") ||
+      Boolean(el.querySelector && el.querySelector("pre, code, .ace_editor, .monaco-editor, [class*='code-block']"));
+
+    if (hasCode) {
+      const clean = String(rawWalk)
         .replace(/[\u200B-\u200D\uFEFF]/g, "")
         .replace(/\r\n/g, "\n")
         .replace(/\r/g, "\n");
+      const lines = clean.split("\n");
+      return lines.map(line => {
+        if (line.includes("//") || line.includes("/*") || /[{};=()\[\]]/.test(line)) {
+          return line.replace(/[\u200B-\u200D\uFEFF]/g, "").trimEnd();
+        }
+        return line.replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+      }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
     }
     return cleanText(rawWalk);
   }
@@ -2477,6 +2498,126 @@
   }
 
   /**
+   * Deterministically classifies question type ("mcq" vs "multi") based purely on visual
+   * indicator geometry and DOM attributes of option elements.
+   * Circle radio indicators (border-radius: 50%, >= minDim*0.38, or <circle> SVG) strictly -> "mcq".
+   * Square checkbox indicators (border-radius < minDim*0.35, or <rect> SVG) strictly -> "multi".
+   */
+  function detectQuestionTypeFromDomIndicators(optionElements, docRef) {
+    if (!Array.isArray(optionElements) || optionElements.length === 0) return null;
+    const doc = docRef || (typeof document !== "undefined" ? document : null);
+
+    // 1. Check for native inputs or explicit ARIA roles
+    let nativeRadioCount = 0;
+    let nativeCheckboxCount = 0;
+    for (const el of optionElements) {
+      if (!el || !el.querySelector) continue;
+      if (el.querySelector("input[type='checkbox'], [role='checkbox']")) {
+        nativeCheckboxCount++;
+      }
+      if (el.querySelector("input[type='radio'], [role='radio']")) {
+        nativeRadioCount++;
+      }
+    }
+    if (nativeCheckboxCount > 0 && nativeCheckboxCount >= nativeRadioCount) return "multi";
+    if (nativeRadioCount > 0 && nativeRadioCount > nativeCheckboxCount) return "mcq";
+
+    // 2. Custom React / styled-components (sc-...) option rows
+    let squareCount = 0;
+    let circleCount = 0;
+
+    for (const row of optionElements) {
+      if (!row) continue;
+
+      // Check child SVGs first
+      if (row.querySelectorAll) {
+        const svgs = Array.from(row.querySelectorAll("svg"));
+        let foundSvg = false;
+        for (const svg of svgs) {
+          if (svg.querySelector("circle")) {
+            circleCount++;
+            foundSvg = true;
+            break;
+          }
+          if (svg.querySelector("rect")) {
+            squareCount++;
+            foundSvg = true;
+            break;
+          }
+        }
+        if (foundSvg) continue;
+      }
+
+      // Check indicator element: child div, span, or svg
+      const candidates = [];
+      if (row.children && row.children.length > 0) {
+        for (const c of Array.from(row.children)) {
+          candidates.push(c);
+          if (c.children && c.children.length > 0) {
+            for (const gc of Array.from(c.children)) {
+              candidates.push(gc);
+            }
+          }
+        }
+      }
+
+      let rowClassified = false;
+      for (const cand of candidates) {
+        if (!cand) continue;
+        const cls = String((cand.className || "") + " " + (cand.getAttribute ? cand.getAttribute("class") || "" : "")).toLowerCase();
+        if (cls.includes("radio")) {
+          circleCount++;
+          rowClassified = true;
+          break;
+        }
+        if (cls.includes("checkbox")) {
+          squareCount++;
+          rowClassified = true;
+          break;
+        }
+
+        let w = cand.clientWidth || parseFloat(cand.style ? cand.style.width : 0) || 0;
+        let h = cand.clientHeight || parseFloat(cand.style ? cand.style.height : 0) || 0;
+        let br = String((cand.style ? (cand.style.borderRadius || cand.style.borderTopLeftRadius) : "") || "").toLowerCase();
+
+        if (typeof window !== "undefined" && window.getComputedStyle) {
+          try {
+            const cs = window.getComputedStyle(cand);
+            if (cs) {
+              if (!w) w = parseFloat(cs.width) || 0;
+              if (!h) h = parseFloat(cs.height) || 0;
+              if (!br) br = String(cs.borderTopLeftRadius || cs.borderRadius || "").toLowerCase();
+            }
+          } catch (_) {}
+        }
+
+        // Target left-hand indicator dimensions: 10 <= width <= 32, 10 <= height <= 32, Math.abs(width - height) <= 5
+        const hasDim = (w >= 10 && w <= 32 && h >= 10 && h <= 32 && Math.abs(w - h) <= 5);
+        if (hasDim || (br && (br.includes("50%") || br.includes("999")))) {
+          const minDim = (w > 0 && h > 0) ? Math.min(w, h) : 18;
+          const brVal = parseFloat(br) || 0;
+          const isCircle = br.includes("50%") || br.includes("100%") || br.includes("999px") || br.includes("9999px") || (minDim > 0 && brVal >= minDim * 0.38);
+          const isSquare = (minDim > 0 && brVal < minDim * 0.35) || brVal === 0 || br === "0px";
+
+          if (isCircle) {
+            circleCount++;
+            rowClassified = true;
+            break;
+          } else if (isSquare) {
+            squareCount++;
+            rowClassified = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (squareCount > 0 && squareCount >= circleCount) return "multi";
+    if (circleCount > 0 && circleCount > squareCount) return "mcq";
+    return null;
+  }
+
+  /**
    * Pure read-only DOM extraction function.
    * Performs ZERO mutations on the host page DOM.
    * 
@@ -2579,9 +2720,11 @@
       const allRadios = Array.from(doc.querySelectorAll("input[type='radio']")).filter(r => !isInsideCodeEditor(r));
       const validRows = [];
       for (const r of allRadios) {
-        const lbl = r.closest("label") || (r.id ? doc.querySelector(`label[for="${r.id}"]`) : null);
+        const lbl = (typeof r.closest === "function" ? r.closest("label") : null) || (r.id ? doc.querySelector(`label[for="${r.id}"]`) : null);
         const parentHasMultiple = r.parentElement && allRadios.filter(other => nodeContains(r.parentElement, other)).length >= 2;
-        const row = lbl || r.closest("[class*='option'], [class*='choice'], [class*='radio'], li, tr") || (!parentHasMultiple ? r.parentElement : r);
+        const parentRow = (r.parentElement && typeof r.parentElement.closest === "function") ? r.parentElement.closest("[class*='option'], [class*='choice'], [class*='radio'], li, tr") : null;
+        const selfRow = (typeof r.closest === "function") ? r.closest("[class*='option'], [class*='choice'], li, tr") : null;
+        const row = lbl || parentRow || selfRow || (!parentHasMultiple ? r.parentElement : r);
         if (isRadioOrOptionVisible(r, row)) {
           validRows.push(row || r);
         }
@@ -2598,9 +2741,11 @@
       const allCheckboxes = Array.from(doc.querySelectorAll("input[type='checkbox'], [role='checkbox']")).filter(cb => !isQuizZyInternalElement(cb) && !isInsideCodeEditor(cb));
       const validRows = [];
       for (const cb of allCheckboxes) {
-        const lbl = cb.closest("label") || (cb.id ? doc.querySelector(`label[for="${cb.id}"]`) : null);
+        const lbl = (typeof cb.closest === "function" ? cb.closest("label") : null) || (cb.id ? doc.querySelector(`label[for="${cb.id}"]`) : null);
         const parentHasMultiple = cb.parentElement && allCheckboxes.filter(other => nodeContains(cb.parentElement, other)).length >= 2;
-        const row = lbl || cb.closest("[class*='option'], [class*='choice'], [class*='checkbox'], li, tr") || (!parentHasMultiple ? cb.parentElement : cb);
+        const parentRow = (cb.parentElement && typeof cb.parentElement.closest === "function") ? cb.parentElement.closest("[class*='option'], [class*='choice'], [class*='checkbox'], li, tr") : null;
+        const selfRow = (typeof cb.closest === "function") ? cb.closest("[class*='option'], [class*='choice'], li, tr") : null;
+        const row = lbl || parentRow || selfRow || (!parentHasMultiple ? cb.parentElement : cb);
         if (isRadioOrOptionVisible(cb, row)) {
           validRows.push(row || cb);
         }
@@ -3175,10 +3320,19 @@
           return /^[1-8][\.\:\s]/.test(t) || !!(el.querySelector && el.querySelector("[class*='slot' i], [class*='index' i], [class*='number' i], [class*='badge' i]"));
         });
 
+        const indicatorQType = detectQuestionTypeFromDomIndicators(optionElements, doc);
+
         const isTrueOrdering = (isDraggableOrder || hasOrderBanner || (hasDragHandles && hasSlotNumbers) || orderDirectiveRegex.test(question) || generalOrderWord) && !hasMcqOnlyOption && !hasRadioInputs && !hasCheckboxInputs;
 
         if (isTrueOrdering) {
           qType = "order";
+        } else if (indicatorQType === "mcq") {
+          // Visual indicator is strictly circular (radio button) -> classify strictly as mcq,
+          // even if the question stem uses plural words (e.g. "What are the possible outputs")
+          qType = "mcq";
+        } else if (indicatorQType === "multi") {
+          // Visual indicator is strictly square (checkbox) -> classify strictly as multi
+          qType = "multi";
         } else if (hasCheckboxInputs || multiDirectiveRegex.test(question)) {
           qType = "multi";
         } else {
@@ -3213,7 +3367,7 @@
         question = trimmedCode;
         matchedSelectors.question = "swipeable-code-stem";
       } else if (!question.includes(trimmedCode)) {
-        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\`\n\n[CODE SNIPPET]:\n${trimmedCode}`;
+        question = `${question}\n\nReference Code:\n\`\`\`\n${trimmedCode}\n\`\`\``;
       }
     }
 
@@ -3445,6 +3599,7 @@
     resolveOptionRowRoot,
     extractSvgGraphTopology,
     extractVisualContext,
+    detectQuestionTypeFromDomIndicators,
     extractQuizFromDom,
     extractCodingQuestionFromDom,
     extractCodingProblem,
@@ -3483,10 +3638,12 @@
         badges.forEach((b) => {
           if (b && typeof b.remove === "function") b.remove();
         });
-        const highlighted = document.querySelectorAll("[data-quizzy-highlight]");
+        const highlighted = document.querySelectorAll("[data-quizzy-highlight], [data-quizzy-selected], [data-quizzy-multi-checked]");
         highlighted.forEach((el) => {
           if (el && typeof el.removeAttribute === "function") {
             el.removeAttribute("data-quizzy-highlight");
+            el.removeAttribute("data-quizzy-selected");
+            el.removeAttribute("data-quizzy-multi-checked");
           }
           if (el && el.style) {
             el.style.outline = "";

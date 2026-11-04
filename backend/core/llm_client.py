@@ -73,6 +73,10 @@ from backend.core.key_pool import (
     reset_provider_cooldown,
     set_model_cooldown,
     set_provider_cooldown,
+    GROQ_PRIORITY_BUCKETS,
+    is_key_model_quarantined,
+    is_model_bucket_healthy,
+    select_healthy_groq_pair,
 )
 
 # Re-export provider adapters, completions, and image processing
@@ -84,6 +88,7 @@ from backend.core.providers import (
     check_models,
     download_image_as_base64_raster,
     extract_svg_topology_from_xml,
+    get_shared_async_client,
 )
 
 # Re-export consensus, arbiters, fixtures, and responses
@@ -195,8 +200,8 @@ async def solve_question(
 
     local_client = False
     if client is None or getattr(client, "is_closed", False) is True:
-        client = httpx.AsyncClient()
-        local_client = True
+        client = get_shared_async_client()
+        local_client = False
 
     # 1. Download cross-origin image if URL provided and raster data is missing
     if not image_data and image_url and (str(image_url).startswith("http://") or str(image_url).startswith("https://")):
@@ -242,11 +247,22 @@ async def solve_question(
                 agreement_details={},
             )
     else:
-        groq_key = groq_keys[0] if groq_keys else ""
+        groq_key = get_next_groq_key() if groq_keys else ""
         openrouter_key = or_keys[0] if or_keys else ""
 
     pri_a = config["primary_a"]
     pri_b = config["primary_b"]
+    if groq_key and pri_a.get("provider") == "groq" and pri_b.get("provider") == "groq":
+        a_model = pri_a.get("model", "")
+        b_model = pri_b.get("model", "")
+        known_bucket_models = {b["model"] for b in GROQ_PRIORITY_BUCKETS}
+        if a_model in known_bucket_models or b_model in known_bucket_models:
+            if not is_model_bucket_healthy("groq", groq_key, a_model) or not is_model_bucket_healthy("groq", groq_key, b_model):
+                pair_a, pair_b = select_healthy_groq_pair(groq_key)
+                if pair_a and pair_b:
+                    pri_a = dict(pri_a, model=pair_a["model"])
+                    pri_b = dict(pri_b, model=pair_b["model"])
+
     fb_config = config.get("fallback", {})
     fallback_pool = config.get("fallback_pool") or ([fb_config.get("model")] if fb_config else [])
 
@@ -328,8 +344,9 @@ async def solve_question(
                     if is_model_in_cooldown("groq", v_model) or is_model_quarantined(v_model):
                         continue
                     models_called = [f"vision:groq/{v_model}"]
+                    v_key = get_next_groq_key(model=v_model) or groq_keys[0]
                     v_raw, v_parsed, v_norm, v_el, v_err = await call_model_with_budget_retry(
-                        client, "groq", v_model, messages, groq_keys[0], groq_timeout_ms, q_type, options,
+                        client, "groq", v_model, messages, v_key, groq_timeout_ms, q_type, options,
                         max_tokens=max_tokens, language=language, starter_code=starter_code,
                     )
                     if not v_err:
@@ -453,8 +470,9 @@ async def solve_question(
                 if is_model_in_cooldown("groq", v_model) or is_model_quarantined(v_model):
                     continue
                 models_called = [f"topology:{v_model}"]
+                t_key = get_next_groq_key(model=v_model) or groq_keys[0]
                 v_raw, v_parsed, v_norm, v_el, v_err = await call_model_with_budget_retry(
-                    client, "groq", v_model, text_topo_messages, groq_keys[0], groq_timeout_ms, q_type, options,
+                    client, "groq", v_model, text_topo_messages, t_key, groq_timeout_ms, q_type, options,
                     max_tokens=max_tokens, language=language, starter_code=starter_code,
                 )
                 if not v_err and v_norm:
@@ -573,7 +591,7 @@ async def solve_question(
                         if p_provider == "groq":
                             if not groq_keys:
                                 continue
-                            p_key = get_next_groq_key() or groq_keys[0]
+                            p_key = get_next_groq_key(model=p_model) or groq_keys[0]
                             p_timeout = groq_timeout_ms
                         elif p_provider == "gemini":
                             gemini_keys = load_gemini_api_keys()
@@ -672,12 +690,14 @@ async def solve_question(
                 agreement_details={},
             )
         else:
+            key_a = get_next_groq_key(model=pri_a.get("model")) or groq_key
+            key_b = get_next_groq_key(exclude=key_a, model=pri_b.get("model")) or key_a
             res_a_task = call_groq_primary(
-                client, pri_a["provider"], pri_a["model"], messages, groq_key, groq_timeout_ms, q_type, options,
+                client, pri_a["provider"], pri_a["model"], messages, key_a, groq_timeout_ms, q_type, options,
                 language=language, starter_code=starter_code, max_tokens=max_tokens,
             )
             res_b_task = call_groq_primary(
-                client, pri_b["provider"], pri_b["model"], messages, groq_key, groq_timeout_ms, q_type, options,
+                client, pri_b["provider"], pri_b["model"], messages, key_b, groq_timeout_ms, q_type, options,
                 language=language, starter_code=starter_code, max_tokens=max_tokens,
             )
 
@@ -747,9 +767,13 @@ async def solve_question(
             if norm_a.canonical_key == norm_b.canonical_key:
                 agree = True
             elif q_type in ("multi", "multi_mcq", "multiselect"):
-                keys_a = set(norm_a.canonical_keys or norm_a.canonical_key.split(","))
-                keys_b = set(norm_b.canonical_keys or norm_b.canonical_key.split(","))
-                agree = bool(keys_a and keys_a == keys_b)
+                indices_a = tuple(sorted(norm_a.selected_indices or []))
+                indices_b = tuple(sorted(norm_b.selected_indices or []))
+                keys_a = set(norm_a.canonical_keys or [k.strip() for k in norm_a.canonical_key.split(",") if k.strip()])
+                keys_b = set(norm_b.canonical_keys or [k.strip() for k in norm_b.canonical_key.split(",") if k.strip()])
+                agree = bool((indices_a and indices_a == indices_b) or (keys_a and keys_a == keys_b))
+            elif (norm_a.canonical_key or "").replace(" ", "") == (norm_b.canonical_key or "").replace(" ", ""):
+                agree = True
 
         if agree:
             reason_a = parsed_a.reason if parsed_a else ""
@@ -794,6 +818,47 @@ async def solve_question(
                 agreement_details=agreement_details,
             )
 
+        is_429_b = bool(err_b and ("429" in str(err_b) or "rate" in str(err_b).lower() or "quota" in str(err_b).lower()))
+        is_429_a = bool(err_a and ("429" in str(err_a) or "rate" in str(err_a).lower() or "quota" in str(err_a).lower()))
+
+        if succ_a and norm_a and not succ_b and is_429_b:
+            reason_val = (parsed_a.reason if parsed_a else "") or "Primary A rescued via single-primary survival fast-path (Primary B hit 429)."
+            return SolverResponse(
+                status="OK",
+                confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                canonical_key=norm_a.canonical_key,
+                selected_index=norm_a.selected_index,
+                selected_text=norm_a.selected_text,
+                selected_indices=norm_a.selected_indices,
+                selected_texts=norm_a.selected_texts,
+                canonical_keys=norm_a.canonical_keys,
+                permutation_indices=norm_a.permutation_indices,
+                ordered_texts=norm_a.ordered_texts,
+                reason=reason_val,
+                latency_ms=elapsed_primaries_ms,
+                models_called=models_called,
+                agreement_details=agreement_details,
+            )
+
+        if succ_b and norm_b and not succ_a and is_429_a:
+            reason_val = (parsed_b.reason if parsed_b else "") or "Primary B rescued via single-primary survival fast-path (Primary A hit 429)."
+            return SolverResponse(
+                status="OK",
+                confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                canonical_key=norm_b.canonical_key,
+                selected_index=norm_b.selected_index,
+                selected_text=norm_b.selected_text,
+                selected_indices=norm_b.selected_indices,
+                selected_texts=norm_b.selected_texts,
+                canonical_keys=norm_b.canonical_keys,
+                permutation_indices=norm_b.permutation_indices,
+                ordered_texts=norm_b.ordered_texts,
+                reason=reason_val,
+                latency_ms=elapsed_primaries_ms,
+                models_called=models_called,
+                agreement_details=agreement_details,
+            )
+
         if not succ_a and not succ_b:
             remaining_ms = max(400.0, hard_budget_ms - elapsed_primaries_ms)
             fb_call_timeout = min(fb_timeout_ms_max, remaining_ms)
@@ -801,6 +866,12 @@ async def solve_question(
 
             arb_key = groq_keys[1] if len(groq_keys) > 1 else groq_key
             arbiter_model = config.get("arbiter", {}).get("model") or "openai/gpt-oss-20b"
+            if is_key_model_quarantined(arb_key, arbiter_model) or is_model_quarantined(arbiter_model) or (is_429_a and is_429_b):
+                for b_item in GROQ_PRIORITY_BUCKETS:
+                    cand_m = b_item["model"]
+                    if cand_m not in (pri_a.get("model"), pri_b.get("model")) and is_model_bucket_healthy("groq", arb_key, cand_m):
+                        arbiter_model = cand_m
+                        break
 
             arb_task = None
             if groq_key and arb_timeout_ms >= 300.0:
@@ -851,7 +922,9 @@ async def solve_question(
                             agreement_details["groq_arbiter"] = arb_details
                             if arb_sol is not None:
                                 norm_arb_key = arb_details.get("canonical_key")
-                                if norm_arb_key in (norm_a.canonical_key, norm_b.canonical_key) or norm_arb_key:
+                                norm_a_key = norm_a.canonical_key if norm_a else None
+                                norm_b_key = norm_b.canonical_key if norm_b else None
+                                if (norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key)) or norm_arb_key:
                                     for p in pending_set:
                                         p.cancel()
                                     total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -1121,11 +1194,17 @@ async def solve_question(
 
             remaining_ms = hard_budget_ms - ((time.perf_counter() - t0) * 1000.0)
 
+        arb_key = groq_keys[1] if len(groq_keys) > 1 else groq_key
         arbiter_model = config.get("arbiter", {}).get("model") or "openai/gpt-oss-20b"
+        if is_key_model_quarantined(arb_key, arbiter_model) or is_model_quarantined(arbiter_model):
+            for b_item in GROQ_PRIORITY_BUCKETS:
+                cand_m = b_item["model"]
+                if cand_m not in (pri_a.get("model"), pri_b.get("model")) and is_model_bucket_healthy("groq", arb_key, cand_m):
+                    arbiter_model = cand_m
+                    break
         cand_a_str = f"Option {norm_a.canonical_key}: {norm_a.selected_text}" if (norm_a and norm_a.canonical_key) else None
         cand_b_str = f"Option {norm_b.canonical_key}: {norm_b.selected_text}" if (norm_b and norm_b.canonical_key) else None
 
-        arb_key = groq_keys[1] if len(groq_keys) > 1 else groq_key
         rem_ms = max(400.0, hard_budget_ms - ((time.perf_counter() - t0) * 1000.0))
         fb_call_timeout = min(fb_timeout_ms_max, rem_ms)
         arb_timeout_ms = min(1800.0, rem_ms)
@@ -1182,7 +1261,9 @@ async def solve_question(
                             agreement_details["groq_arbiter"] = arb_details
                             if arb_sol is not None:
                                 norm_arb_key = arb_details.get("canonical_key")
-                                if norm_arb_key in (norm_a.canonical_key, norm_b.canonical_key) or norm_arb_key:
+                                norm_a_key = norm_a.canonical_key if norm_a else None
+                                norm_b_key = norm_b.canonical_key if norm_b else None
+                                if (norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key)) or norm_arb_key:
                                     for p in pending_set:
                                         p.cancel()
                                     total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -1218,6 +1299,9 @@ async def solve_question(
                 canonical_key=chosen_norm.canonical_key,
                 selected_index=chosen_norm.selected_index,
                 selected_text=chosen_norm.selected_text,
+                selected_indices=chosen_norm.selected_indices,
+                selected_texts=chosen_norm.selected_texts,
+                canonical_keys=chosen_norm.canonical_keys,
                 permutation_indices=chosen_norm.permutation_indices,
                 ordered_texts=chosen_norm.ordered_texts,
                 reason=chosen_parsed.reason if chosen_parsed else "Tie-breaker primary derivation.",
@@ -1268,6 +1352,9 @@ async def solve_question(
                 canonical_key=surviving_norm.canonical_key,
                 selected_index=surviving_norm.selected_index,
                 selected_text=surviving_norm.selected_text,
+                selected_indices=surviving_norm.selected_indices,
+                selected_texts=surviving_norm.selected_texts,
+                canonical_keys=surviving_norm.canonical_keys,
                 permutation_indices=surviving_norm.permutation_indices,
                 ordered_texts=surviving_norm.ordered_texts,
                 reason=(surviving_parsed.reason if surviving_parsed else "") or "Surviving primary model rescue.",

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from backend.core.normalizer import parse_options
 
 
-SYSTEM_PROMPT = """<system_role>
+BASE_SYSTEM_PROMPT = """<system_role>
 You are the Core Verification and Assessment Engine for QuizZy. Your mandate is 100% factual, mathematical, and logical accuracy. Never guess or select an option before deriving proof from first principles.
 </system_role>
 
@@ -47,11 +47,17 @@ CRITICAL CALCULATION & VERIFICATION RULES:
 1. Arithmetic & Logic: Compute formulas/traces in workspace FIRST before writing synthetic option letter in 'answer'. For puzzles (ages, scheduling, relations), verify arithmetic twice.
 2. Negative Polarity: For questions with 'NOT', 'INCORRECT', 'FALSE', 'EXCEPT', 'LEAST', select the statement matching the negative condition.
 3. Permutations / Combinatorics: Count total items N and frequencies of repeating elements (e.g. ARRANGE has 7 letters, A=2, R=2 -> 7!/(2!*2!) = 1260).
-4. Hash Functions: Division: h(k)=k mod m. Multiplication: h(k)=floor(m * frac(k * A)). Linear probing: check slot -> if occupied move to next slot (index+1) until empty slot found. Double hashing advantages: "Reduces clustering" and "Uses a second hash function".
-5. Multi-choice ('multi'): Evaluate every option independently. Return all correct letters, e.g. ["A", "D"]. For Stack/Queue state tracing: perform a step-by-step dry run of every operation. In an array-based Stack, 'top' points to the topmost active element; when popping, 'top' decrements (top = top - 1). Elements above 'top' (arr[k] where k > top) are logically inactive. The active stack state consists ONLY of 'top' and elements arr[0..top]. Select all matching statements for 'top' and active elements (e.g., if final top=0 and arr[0]=10, select both 'top = 0' and 'arr[0] = 10'). For circular/array Queue operations: when a queue is initially empty, both front and back start at -1 (or capacity-1 or 0). On a push operation when the queue is initially empty, both 'front' and 'back' pointers must be initialized together (e.g., select both 'Set front to ...' and 'Set back to ...').
-6. Code Complexity & Linked Lists: Skewed binary tree has height H=N, so worst-case auxiliary space is O(N) (never O(log N)). Balanced tree is O(log N). For nested loops, loop multipliers (i*=2 -> log N), count nesting depth strictly. For Flattening a Linked List with sub-lists (flattenLL): flattening merges all sorted sub-lists into a single ascending sorted sequence of values (e.g., [[10], [4, 20], [3, 5, 15]] -> "3 4 5 10 15 20"). For overall approach ordering of flattenLL: (1) Initialize temp1 to head and temp2 to the next node, (2) Store the next node of temp2, (3) Merge temp1 and temp2 lists, (4) Move temp2 to the next stored node.
-7. Step Ordering ('order'): Chronological execution trace: (1) Init, (2) Loop header/accumulate, (3) Update best (Kadane: update maxSum before reset), (4) Reset state if negative, (5) Return. Output JSON array of synthetic letters, e.g. ["B", "D", "A", "C"].
-8. VISUAL & GRAPH/TREE REASONING DIRECTIVE:
+4. Hash Functions: Division: h(k)=k mod m. Multiplication: h(k)=floor(m * frac(k * A)). Linear probing: check slot -> if occupied move to next slot (index+1) until empty slot found. Double hashing advantages: "Reduces clustering" and "Uses a second hash function"."""
+
+MULTI_SELECT_PROMPT_SECTION = """5. Multi-choice ('multi'): Exhaustive Independent Option Evaluation.
+Inside 'reason', evaluate EVERY single option (A, B, C, D, ...) one by one as A: True/False (why), B: True/False (why), ... before writing 'answer'. Explicitly forbid stopping at the first correct option; ALL options that are true MUST be included in 'answer' (e.g. ['A', 'C'] or 'A, C'). Keep 'reason' concise and math/fact-dense (<= 80 words for MCQ/multi/order/text). For Stack/Queue state tracing: perform a step-by-step dry run of every operation. In an array-based Stack, 'top' points to the topmost active element; when popping, 'top' decrements (top = top - 1). Elements above 'top' (arr[k] where k > top) are logically inactive. The active stack state consists ONLY of 'top' and elements arr[0..top]. Select all matching statements for 'top' and active elements (e.g., if final top=0 and arr[0]=10, select both 'top = 0' and 'arr[0] = 10'). For circular/array Queue operations: when a queue is initially empty, both front and back start at -1 (or capacity-1 or 0). On a push operation when the queue is initially empty, both 'front' and 'back' pointers must be initialized together (e.g., select both 'Set front to ...' and 'Set back to ...')."""
+
+STACK_QUEUE_PROMPT_SECTION = """6. Code Complexity & Linked Lists: Skewed binary tree has height H=N, so worst-case auxiliary space is O(N) (never O(log N)). Balanced tree is O(log N). For nested loops, loop multipliers (i*=2 -> log N), count nesting depth strictly. For Flattening a Linked List with sub-lists (flattenLL): flattening merges all sorted sub-lists into a single ascending sorted sequence of values (e.g., [[10], [4, 20], [3, 5, 15]] -> "3 4 5 10 15 20"). For overall approach ordering of flattenLL: (1) Initialize temp1 to head and temp2 to the next node, (2) Store the next node of temp2, (3) Merge temp1 and temp2 lists, (4) Move temp2 to the next stored node.
+For Queue front(): In a queue with elements [10, 20, 30] where 10 is at the front, front() operation returns 10 without removing it."""
+
+ORDERING_PROMPT_SECTION = """7. Step Ordering ('order'): Chronological execution trace: (1) Init, (2) Loop header/accumulate, (3) Update best (Kadane: update maxSum before reset), (4) Reset state if negative, (5) Return. Output JSON array of synthetic letters, e.g. ["B", "D", "A", "C"]."""
+
+GEOMETRY_PROMPT_SECTION = """8. VISUAL & GRAPH/TREE REASONING DIRECTIVE:
    - For BINARY TREE DIAMETER QUESTIONS (e.g. "Given the binary tree, what is the diameter of it?"):
      - CCBP / GRAPH CONVENTION: Diameter is defined as the number of EDGES on the longest path between any two leaf nodes (= nodes - 1).
      - Alternate convention: number of NODES along longest path. Count BOTH edges and nodes.
@@ -94,8 +100,57 @@ Answer format:
 - 'multi': list or comma-separated string of all correct letters (e.g. ["A", "D"]).
 - 'order': ordered sequence of synthetic letters (e.g. ["C", "A", "D", "B"]).
 - 'text': concise factual string (e.g. "0").
-- 'code': complete, optimal, executable source code matching starter signature.
-"""
+- 'code': complete, optimal, executable source code matching starter signature."""
+
+SYSTEM_PROMPT = (
+    BASE_SYSTEM_PROMPT
+    + "\n\n"
+    + MULTI_SELECT_PROMPT_SECTION
+    + "\n\n"
+    + STACK_QUEUE_PROMPT_SECTION
+    + "\n\n"
+    + ORDERING_PROMPT_SECTION
+    + "\n\n"
+    + GEOMETRY_PROMPT_SECTION
+)
+
+
+def get_adaptive_system_prompt(q_type: str = "mcq", question: str = "", has_image: bool = False) -> str:
+    """
+    Task-adaptive system prompt builder:
+    Reduces baseline prompt overhead from ~1,400 tokens to ~220 tokens base, appending
+    domain directives strictly when triggered by question type, image presence, or domain keywords.
+    """
+    q_type_clean = (q_type or "").strip().lower()
+    q_lower = (question or "").lower()
+
+    sections = [BASE_SYSTEM_PROMPT]
+
+    # Multi-answer truth-table section
+    if q_type_clean in ("multi", "multi_mcq", "multiselect"):
+        sections.append(MULTI_SELECT_PROMPT_SECTION)
+
+    # Ordering section
+    if q_type_clean == "order" or any(k in q_lower for k in ("arrange", "chronological", "reorder", "sort", "in order")):
+        sections.append(ORDERING_PROMPT_SECTION)
+
+    # Stack/Queue/Data structures section
+    if any(k in q_lower for k in ("stack", "queue", "push", "pop", "front(", "rear", "deque", "hash", "hashing", "flattenll", "asteroid")):
+        sections.append(STACK_QUEUE_PROMPT_SECTION)
+
+    # Geometry & visual diagrams section
+    geom_keywords = ("triangle", "square", "rectangle", "grid", "figure", "count the number", "diameter", "binary tree", "tree view", "top view", "bottom view")
+    if has_image or any(k in q_lower for k in geom_keywords):
+        sections.append(GEOMETRY_PROMPT_SECTION)
+
+    sections.append("""Answer format:
+- 'mcq': synthetic letter of best option (e.g. "A").
+- 'multi': list or comma-separated string of all correct letters (e.g. ["A", "D"]).
+- 'order': ordered sequence of synthetic letters (e.g. ["C", "A", "D", "B"]).
+- 'text': concise factual string (e.g. "0").
+- 'code': complete, optimal, executable source code matching starter signature.""")
+
+    return "\n\n".join(sections)
 
 # Alias for backwards compatibility & targeted test suites
 SOLVER_SYSTEM_PROMPT = SYSTEM_PROMPT
@@ -217,10 +272,11 @@ def build_user_prompt(
     elif q_type_clean == "multi":
         letters = [chr(65 + i) for i in range(len(options))]
         lines.append(
-            f"Evaluate EACH option ({', '.join(letters)}) independently as true or false in <verification_workspace>. "
-            f"Select ALL correct options. "
-            f"Return list or comma-separated string of ALL correct letters in 'answer' (e.g. ['A', 'D'] or 'A, D') inside <verified_json>. "
-            f'Output: <verification_workspace>...</verification_workspace><verified_json>{{"reason": "<evaluate each option>", "answer": ["A", "D"]}}</verified_json>.'
+            f"Exhaustive Independent Option Evaluation: Inside 'reason', evaluate EVERY single option ({', '.join(letters)}) one by one as "
+            f"'A: True/False (why), B: True/False (why), ...' before determining 'answer'. "
+            f"Do NOT stop at the first correct option; ALL options that are true MUST be included in 'answer' (e.g. ['A', 'C'] or 'A, C'). "
+            f"Keep 'reason' concise (<= 80 words) and math/fact-dense. "
+            f'Output: <verification_workspace>...</verification_workspace><verified_json>{{"reason": "<evaluate each option A..{letters[-1]}>", "answer": ["A", "C"]}}</verified_json>.'
         )
     elif q_type_clean == "order":
         letters = [chr(65 + i) for i in range(len(options))]
@@ -339,8 +395,9 @@ def build_prompt_messages(
         starter_code=starter_code,
         error_context=error_context,
     )
+    system_content = get_adaptive_system_prompt(q_type=q_type, question=question, has_image=bool(image_data))
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": format_user_content(user_content, image_data)},
     ]
 
@@ -386,8 +443,9 @@ def build_arbiter_messages(
             "Then select the strictly correct option in 'answer'."
         )
     user_content += "\n".join(contrast_lines)
+    system_content = get_adaptive_system_prompt(q_type=q_type, question=question, has_image=bool(image_data))
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": format_user_content(user_content, image_data)},
     ]
 

@@ -30,13 +30,14 @@
           type: "CCBP_PAGE_HEARTBEAT",
           trigger,
           url: window.location.href,
-        }).then((res) => {
+        }, (res) => {
+          if (chrome.runtime && chrome.runtime.lastError) return;
           if (res && typeof window !== "undefined" && typeof window.__QUIZZY_ON_BACKEND_HEALTH_UPDATE__ === "function") {
             window.__QUIZZY_ON_BACKEND_HEALTH_UPDATE__(res.backend_healthy !== false);
           }
-        }).catch(() => {});
+        });
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   function notifyUnload() {
@@ -46,9 +47,11 @@
         chrome.runtime.sendMessage({
           type: "CCBP_PAGE_UNLOAD",
           url: window.location.href,
-        }).catch(() => {});
+        }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) { }
+        });
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   function setHeartbeatInterval(intervalMs) {
@@ -57,7 +60,7 @@
       if (!isExtensionContextValid()) {
         stopHeartbeatLoop();
         if (bridgeAbortController && typeof bridgeAbortController.abort === "function") {
-          try { bridgeAbortController.abort("Context Invalidated"); } catch (_) {}
+          try { bridgeAbortController.abort("Context Invalidated"); } catch (_) { }
         }
         return;
       }
@@ -134,66 +137,82 @@
 
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("keydown", (e) => {
-    if (!e || e.__quizzy_handled__) return;
+      if (!e || e.__quizzy_handled__) return;
 
-    // Ctrl + Alt + 0: Portal Completion Toggle
-    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      if (typeof e.stopPropagation === "function") e.stopPropagation();
-      e.__quizzy_handled__ = true;
-
-      // Route safety guard: do not start if on standalone question or quiz runner
-      const pathname = (typeof window !== "undefined" && window.location) ? (window.location.pathname || "") : "";
-      if (/\/question\/[a-z0-9-]+/i.test(pathname) || /\/assessment\/|\/test-runner\//i.test(pathname)) {
-        return;
-      }
-
-      if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.toggle === "function") {
-        window.QuizZyPortalCompletion.toggle();
-        return;
-      }
-
-      try {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_TOGGLE" }).catch(() => {});
-        }
-      } catch (_) {}
-      return;
-    }
-
-    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16;
-    if (isShift) {
-      const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
-      if (isEditableElement(e.target) || isEditableElement(activeEl) || e.ctrlKey || e.altKey || e.metaKey) {
-        bridgeShiftComboUsed = true;
-        return;
-      }
-      if (bridgeShiftDown) return;
-      bridgeShiftDown = true;
-      bridgeShiftComboUsed = false;
-    } else {
-      if (bridgeShiftDown) bridgeShiftComboUsed = true;
-    }
-  }, bridgeSignal ? { signal: bridgeSignal, capture: true } : { capture: true });
-
-  window.addEventListener("keyup", (e) => {
-    if (!e || e.__quizzy_handled__) return;
-    const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16;
-    if (isShift) {
-      bridgeShiftDown = false;
-      if (!bridgeShiftComboUsed) {
-        // If floating HUD is already active and handled the event, do nothing
-        if (window.__QUIZZY_HUD_INSTANCE__ || window.__QUIZZY_IN_PAGE_HUD__) {
+      // Alt + R: In-Place Extension Soft Refresh
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "r" || e.key === "R" || e.code === "KeyR")) {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        const tag = (activeEl && activeEl.tagName) ? activeEl.tagName.toUpperCase() : "";
+        const isEdit = tag === "INPUT" || tag === "TEXTAREA" || (activeEl && activeEl.isContentEditable) || (activeEl && activeEl.closest && activeEl.closest('.monaco-editor, .ace_editor'));
+        if (!isEdit && typeof window !== "undefined" && typeof window.__QUIZZY_SOFT_REFRESH_EXTENSION__ === "function") {
+          if (typeof e.preventDefault === "function") e.preventDefault();
+          if (typeof e.stopPropagation === "function") e.stopPropagation();
+          e.__quizzy_handled__ = true;
+          window.__QUIZZY_SOFT_REFRESH_EXTENSION__();
           return;
         }
+      }
+
+      // Ctrl + Alt + 0: Portal Completion Toggle
+      if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
+        if (typeof e.preventDefault === "function") e.preventDefault();
+        if (typeof e.stopPropagation === "function") e.stopPropagation();
+        e.__quizzy_handled__ = true;
+
+        // Route safety guard: do not start if on standalone question or quiz runner
+        const pathname = (typeof window !== "undefined" && window.location) ? (window.location.pathname || "") : "";
+        if (/\/question\/[a-z0-9-]+/i.test(pathname) || /\/assessment\/|\/test-runner\//i.test(pathname)) {
+          return;
+        }
+
+        if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.toggle === "function") {
+          window.QuizZyPortalCompletion.toggle();
+          return;
+        }
+
         try {
           if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-            chrome.runtime.sendMessage({ action: "TRIGGER_AUTO" }).catch(() => {});
+            chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_TOGGLE" }, () => {
+              if (chrome.runtime && chrome.runtime.lastError) { }
+            });
           }
-        } catch (_) {}
+        } catch (_) { }
+        return;
       }
-      bridgeShiftComboUsed = false;
-    }
-  }, bridgeSignal ? { signal: bridgeSignal, capture: true } : { capture: true });
+
+      const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16;
+      if (isShift) {
+        const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+        if (isEditableElement(e.target) || isEditableElement(activeEl) || e.ctrlKey || e.altKey || e.metaKey) {
+          bridgeShiftComboUsed = true;
+          return;
+        }
+        if (bridgeShiftDown) return;
+        bridgeShiftDown = true;
+        bridgeShiftComboUsed = false;
+      } else {
+        if (bridgeShiftDown) bridgeShiftComboUsed = true;
+      }
+    }, bridgeSignal ? { signal: bridgeSignal, capture: true } : { capture: true });
+
+    window.addEventListener("keyup", (e) => {
+      if (!e || e.__quizzy_handled__) return;
+      const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16;
+      if (isShift) {
+        bridgeShiftDown = false;
+        if (!bridgeShiftComboUsed) {
+          // If floating HUD is already active and handled the event, do nothing
+          if (window.__QUIZZY_HUD_INSTANCE__ || window.__QUIZZY_IN_PAGE_HUD__) {
+            return;
+          }
+          try {
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+              chrome.runtime.sendMessage({ action: "TRIGGER_AUTO" });
+            }
+          } catch (_) { }
+        }
+        bridgeShiftComboUsed = false;
+      }
+    }, bridgeSignal ? { signal: bridgeSignal, capture: true } : { capture: true });
   }
 })();

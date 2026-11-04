@@ -4,13 +4,24 @@
 .DESCRIPTION
     Configures virtual environment, installs requirements, registers Native Messaging Host,
     sets up background daemon, creates desktop shortcuts, and verifies environment.
+.PARAMETER Quick
+    Fast <10s mode: reuses .venv, registers host and daemon, starts daemon, skips tests.
+.PARAMETER Recommended
+    Full recommended mode (default): full install, desktop shortcut, offline self-test, starts daemon.
 #>
+param(
+    [switch]$Quick,
+    [switch]$Recommended
+)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 
+$mode = if ($Quick) { "QUICK" } else { "RECOMMENDED" }
+
 Write-Host "=====================================================================" -ForegroundColor Cyan
 Write-Host "               QuizZy / Jivvu Setup & Installer (PowerShell)         " -ForegroundColor Cyan
+Write-Host "                             Mode: $mode                             " -ForegroundColor Cyan
 Write-Host "=====================================================================" -ForegroundColor Cyan
 
 # 1. Check Python
@@ -43,8 +54,12 @@ Write-Host "Virtual environment ready: $venvPython" -ForegroundColor Green
 # 3. Dependencies
 Write-Host "`n[3/6] Installing dependencies from requirements.txt..." -ForegroundColor Yellow
 $reqFile = Join-Path $repoRoot "requirements.txt"
-& $venvPython -m pip install --upgrade pip -q
-& $venvPython -m pip install -r $reqFile -q
+if ($mode -eq "QUICK") {
+    & $venvPython -m pip install -r $reqFile -q --no-warn-script-location
+} else {
+    & $venvPython -m pip install --upgrade pip -q
+    & $venvPython -m pip install -r $reqFile -q
+}
 if ($LASTEXITCODE -ne 0) {
     throw "pip install failed."
 }
@@ -78,19 +93,25 @@ if (-not (Test-Path $nativeExe) -and (Test-Path $nativeCs)) {
 
 $nativePy = Join-Path $repoRoot "backend\native_host.py"
 & $venvPython "$nativePy" --register
-Write-Host "Native Messaging Host registered in Windows Registry." -ForegroundColor Green
+& $venvPython -m backend.cli daemon | Out-Null
+Write-Host "Native Messaging Host & Windows Startup daemon registered." -ForegroundColor Green
 
-# 6. Desktop Shortcut & Background Daemon
-Write-Host "`n[6/6] Creating Desktop Shortcuts & Startup Daemon..." -ForegroundColor Yellow
-& $venvPython -m backend.cli shortcut --name "Jev"
-& $venvPython -m backend.cli daemon
-Write-Host "Desktop shortcut created & daemon registered." -ForegroundColor Green
+# 6. Mode Execution
+if ($mode -eq "RECOMMENDED") {
+    Write-Host "`n[6/6] Creating Desktop Shortcut, Certifying Self-Test & Starting Daemon..." -ForegroundColor Yellow
+    & $venvPython -m backend.cli shortcut --name "Jev" | Out-Null
+    $evalPy = Join-Path $repoRoot "eval\run_eval.py"
+    & $venvPython "$evalPy" --self-test
+    & $venvPython -m backend.lifecycle_manager --start | Out-Null
+} else {
+    Write-Host "`n[6/6] Quick Mode: Starting background lifecycle daemon..." -ForegroundColor Yellow
+    & $venvPython -m backend.lifecycle_manager --start | Out-Null
+}
 
 Write-Host "`n=====================================================================" -ForegroundColor Cyan
 Write-Host "                      SETUP COMPLETED SUCCESSFULLY!                  " -ForegroundColor Cyan
 Write-Host "=====================================================================" -ForegroundColor Cyan
 Write-Host "`nNext Steps:" -ForegroundColor Yellow
 Write-Host "1. CONFIGURE API KEYS: Open 'backend\.env' and paste your free Groq / OpenRouter keys."
-Write-Host "2. LOAD EXTENSION: Open Chrome -> chrome://extensions -> Toggle 'Developer mode' -> 'Load unpacked' -> Select the 'extension' folder."
-Write-Host "3. START: Open https://learning.ccbp.in. The backend and desktop app will start automatically!`n"
-
+Write-Host "2. LOAD EXTENSION: Open Chrome or Edge -> chrome://extensions -> Toggle 'Developer mode' -> 'Load unpacked' -> Select 'extension' folder."
+Write-Host "3. START: Open https://learning.ccbp.in. Assistant starts automatically!`n"

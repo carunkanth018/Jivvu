@@ -300,3 +300,116 @@ def test_background_js_ccbp_lifecycle_in_node() -> None:
     )
     assert res.returncode == 0, f"Node script failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
     assert "CCBP_AUTO_LIFECYCLE_NODE_TESTS_PASSED" in res.stdout
+
+
+def test_background_js_ccbp_heartbeat_and_is_backend_running_defined() -> None:
+    """
+    Verify that background.js defines isBackendRunning at module scope and
+    handles CCBP_PAGE_HEARTBEAT / CCBP_PAGE_ACTIVE without throwing ReferenceError.
+    """
+    bg_code = (PROJECT_ROOT / "extension" / "background.js").read_text(encoding="utf-8")
+    assert "let isBackendRunning = false;" in bg_code, "background.js must define isBackendRunning"
+
+    node_script = r"""
+    const fs = require('fs');
+    const vm = require('vm');
+
+    let messageListener = null;
+    const mockChrome = {
+      runtime: {
+        onMessage: { addListener: (fn) => { messageListener = fn; } },
+        onInstalled: { addListener: () => {} },
+        onStartup: { addListener: () => {} },
+        getURL: (s) => s,
+        id: 'test-ext-id'
+      },
+      tabs: {
+        onUpdated: { addListener: () => {} },
+        onCreated: { addListener: () => {} },
+        onRemoved: { addListener: () => {} },
+        onReplaced: { addListener: () => {} },
+        query: (q, cb) => cb([])
+      },
+      windows: {
+        onRemoved: { addListener: () => {} },
+        getAll: (q, cb) => cb([])
+      },
+      webNavigation: {
+        onHistoryStateUpdated: { addListener: () => {} },
+        onCommitted: { addListener: () => {} }
+      },
+      alarms: {
+        get: (n, cb) => cb(null),
+        create: () => {},
+        clear: () => Promise.resolve()
+      },
+      action: {
+        setBadgeText: () => {},
+        setBadgeBackgroundColor: () => {},
+        onClicked: { addListener: () => {} }
+      },
+      storage: {
+        local: {
+          get: (k, cb) => cb({}),
+          set: (v, cb) => cb && cb()
+        }
+      },
+      scripting: {
+        executeScript: () => Promise.resolve([{ result: true }])
+      }
+    };
+
+    const sandbox = {
+      chrome: mockChrome,
+      fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+      setTimeout,
+      clearTimeout,
+      console,
+      URL,
+      Array,
+      Object,
+      String,
+      Number,
+      Boolean,
+      Date,
+      RegExp,
+      Map,
+      Set
+    };
+
+    const bgSource = fs.readFileSync('extension/background.js', 'utf8');
+    vm.runInNewContext(bgSource, sandbox);
+
+    if (!messageListener) {
+      throw new Error("No onMessage listener registered by background.js");
+    }
+
+    let heartbeatRes = null;
+    messageListener({ type: "CCBP_PAGE_HEARTBEAT" }, {}, (res) => { heartbeatRes = res; });
+    if (!heartbeatRes || heartbeatRes.success !== true) {
+      throw new Error("CCBP_PAGE_HEARTBEAT failed: " + JSON.stringify(heartbeatRes));
+    }
+    if (typeof heartbeatRes.backend_healthy !== "boolean") {
+      throw new Error("backend_healthy must be boolean: " + JSON.stringify(heartbeatRes));
+    }
+
+    let activeRes = null;
+    messageListener({ type: "CCBP_PAGE_ACTIVE" }, {}, (res) => { activeRes = res; });
+    if (!activeRes || activeRes.success !== true) {
+      throw new Error("CCBP_PAGE_ACTIVE failed: " + JSON.stringify(activeRes));
+    }
+
+    console.log("HEARTBEAT_TEST_PASSED");
+    """
+
+    res = subprocess.run(
+        ["node", "-e", node_script],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert res.returncode == 0, f"Node script failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    assert "HEARTBEAT_TEST_PASSED" in res.stdout
+

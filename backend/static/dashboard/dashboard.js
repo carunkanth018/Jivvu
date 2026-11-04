@@ -300,8 +300,8 @@
         : `<span class="badge-status-fail">FAILURE</span>`;
 
       const accBadge = log.is_accurate
-        ? `<span class="badge-acc-true">✓ Valid</span>`
-        : `<span class="badge-acc-false">✗ Inaccurate</span>`;
+        ? `<span class="badge-acc-true">Valid</span>`
+        : `<span class="badge-acc-false">Inaccurate</span>`;
 
       let errClass = "badge-error-type";
       if (log.error_type === "HALLUCINATED_OPTION" || log.error_type === "EMPTY_ANSWER") {
@@ -312,7 +312,7 @@
 
       const qSnippet = log.question_text ? escapeHtml(log.question_text.slice(0, 75)) : "<em>(Empty stem)</em>";
       const ansSnippet = log.selected_answer ? escapeHtml(String(log.selected_answer).slice(0, 45)) : "<em>--</em>";
-      const modelLabel = log.cache_hit ? "⚡ Cache" : escapeHtml(log.model_name || "Solver");
+      const modelLabel = log.cache_hit ? "Cache Hit" : escapeHtml(log.model_name || "Solver");
 
       tr.innerHTML = `
         <td class="table-id-cell">#${log.id}</td>
@@ -344,14 +344,25 @@
       // Build options list
       let optionsHtml = '<div class="timeline-empty-state">No options provided (Free-form / Code)</div>';
       if (Array.isArray(r.options) && r.options.length > 0) {
+        const rawAns = String(r.selected_answer || "").trim();
+        const selectedLetters = new Set(
+          rawAns.split(/[\,\s]+/).map(s => s.trim().toUpperCase()).filter(s => /^[A-Z]$/.test(s))
+        );
+        const selectedIndices = Array.isArray(r.selected_indices) ? new Set(r.selected_indices) : new Set();
+        if (typeof r.selected_index === "number" && r.selected_index >= 0) {
+          selectedIndices.add(r.selected_index);
+        }
+
         optionsHtml = r.options
           .map((opt, idx) => {
+            const letter = String.fromCharCode(65 + idx);
             const isSelected =
-              r.selected_index === idx ||
-              String(r.selected_answer).trim().toLowerCase() === String(opt).trim().toLowerCase();
+              selectedIndices.has(idx) ||
+              selectedLetters.has(letter) ||
+              rawAns.toLowerCase() === String(opt).trim().toLowerCase();
             return `
               <div class="option-item ${isSelected ? "option-selected" : ""}">
-                <span><strong>[${String.fromCharCode(65 + idx)}]</strong> ${escapeHtml(opt)}</span>
+                <span><strong>[${letter}]</strong> ${escapeHtml(opt)}</span>
                 ${isSelected ? '<span class="option-selected-tag">Selected Choice</span>' : ""}
               </div>
             `;
@@ -362,8 +373,8 @@
       // Accuracy banner
       let accBannerClass = r.is_accurate ? "pass" : "fail";
       let accExplanation = r.is_accurate
-        ? "✓ Passed Zero-Hallucination verification: Answer maps directly to a valid choice."
-        : `⚠️ Failed Verification: Classified as ${r.error_type}. ${r.error_message || "Answer is invalid or absent."}`;
+        ? "Passed Zero-Hallucination verification: Answer maps directly to a valid choice."
+        : `Failed Verification: Classified as ${r.error_type}. ${r.error_message || "Answer is invalid or absent."}`;
 
       el.modalContent.innerHTML = `
         <!-- Accuracy Check Banner -->

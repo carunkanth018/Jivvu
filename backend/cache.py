@@ -295,7 +295,7 @@ def get_cached_solution(
             selected_texts = [options[idx] for idx in remapped_indices]
             remapped_answer = ",".join(canonical_keys)
             remapped_index = remapped_indices[0]
-            remapped_text = selected_texts[0]
+            remapped_text = ", ".join(selected_texts)
             permutation_indices = None
             ordered_texts = None
 
