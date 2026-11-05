@@ -912,6 +912,25 @@ Implemented and strictly verified across live `learning.ccbp.in` question models
   - **Full Pytest Suite:** All tests passing (100% pass rate).
   - **Deterministic Offline Self-Test:** 8/8 passed (100%) via `eval/run_eval.py --self-test`.
 
+### 10.28 Elimination of Multi-Select Hallucinated Options, 2-of-3 Bitwise Majority Voting & Telemetry Auditor Hardening
+- **Technical Enhancements Delivered**:
+  1. **Telemetry Multi-Answer Accuracy Auditor Fix (`backend/telemetry_db.py`, `backend/app.py`)**:
+     - Fixed false-positive `HALLUCINATED_OPTION` bug where multi-answer responses (`A, C, D`) were evaluated as joined strings against individual options.
+     - Implemented multi-answer and ordering-aware verification: splits letter tokens and full option texts, verifying each against valid options.
+     - Added `repair_historical_hallucinated_options(db_path)` in `backend/telemetry_db.py` hooked into `init_db()` to automatically heal historical false-positives; successfully repaired rows #9, #11, and #15 to `is_accurate = 1`, `error_type = 'NONE'`, `status = 'SUCCESS'`.
+  2. **Per-Option 2-of-3 Majority Voting & Intersection Rescue (`backend/core/consensus.py`, `backend/core/llm_client.py`)**:
+     - Implemented `compute_multi_majority_indices(set_a, set_b, set_c, num_options)`: performs bitwise 2-of-3 majority voting across Primary A, Primary B, and Arbiter C. An option index is accepted if and only if $\ge 2$ models agree, stripping single-model hallucinated extras.
+     - When Arbiter is unavailable/429, executes **Intersection Rescue** ($S_A \cap S_B$) to retain only options confirmed by both primaries.
+  3. **Strict Code-Snippet Grounding & Bounds Clamping (`backend/core/prompts.py`, `backend/core/normalizer.py`)**:
+     - Injected `ANTI_HALLUCINATION_CODE_SECTION` into multi-select and stack/queue prompts to forbid models from substituting textbook implementations when specific code stems are provided.
+     - Clamped `valid_indices` strictly to `0 <= idx < len(options)` in `normalize_multi_mcq_answer`.
+- **Verification Evidence**:
+  - **Full Pytest Suite:** **302/302 passing (100%)** across all 37 test files (2 skipped, 1 warning in 124.94s).
+  - **Telemetry & Portability Suite:** **23/23 passing (100%)** in `tests/test_final_phase_telemetry_and_portability.py`.
+  - **Three Question Models Suite:** **8/8 passing (100%)** in `tests/test_three_question_models.py`.
+  - **Deterministic Offline Self-Test:** **8/8 passed (100%)** via `eval/run_eval.py --self-test`.
+  - **Live Daemons & Dashboard:** Port 8000 cycled cleanly via `lifecycle_manager.py` (PID 2108, HTTP 200 `/health`); Port 8765 Observability Dashboard active (`ON`, HTTP 200).
+
 ---
 
 > *This document represents the complete, verified state of the QuizZy / Jivvu project as of November 2026. All components have been verified via automated tests and runtime audits.*

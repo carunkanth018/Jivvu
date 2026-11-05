@@ -980,6 +980,26 @@ tests/test_real_screenshots_demo.py: 4 passed
     4. **`Ctrl + Shift + Z`**: Silent Self-Uninstall & Complete DOM Wipe (`chrome.management.uninstallSelf({ showConfirmDialog: false })`).
   - Underlying programmatic APIs (`solveCurrentQuestion`, `applyCurrentSolution`, `clickNextOnPage`, `QuizZyPortalCompletion`) remain fully intact for automation and diagnostics.
 
+### 9. Elimination of Multi-Select Hallucinated Options & Telemetry Auditor Hardening
+- **Root Cause**:
+  1. *Telemetry Auditor False Positive*: In `backend/telemetry_db.py`, `validate_accuracy_and_classify_error` was testing `selected_text` (which joined multiple options with commas on `q_type == "multi"`) against single option strings. This caused completely valid multi-answer requests (`A, C, D`) to be falsely classified as `HALLUCINATED_OPTION`.
+  2. *LLM Multi-Select Over-Inclusion*: Primary LLMs (such as Qwen or LLaMA) would occasionally generate an extra unverified option not in the true solution set (e.g., `{A, C, D}` instead of `{A, C}`), and naive tie-breaking would preserve the larger set.
+- **Architectural Upgrades**:
+  1. *Multi-Answer-Aware Telemetry Auditor (`backend/telemetry_db.py` & `backend/app.py`)*:
+     - Splits multi-answer letters (`A, C, D`) and texts into discrete items and validates every item independently against the valid option set.
+     - Implemented `repair_historical_hallucinated_options(db_path)` which automatically retroactively heals historical false-positive rows on startup (successfully healed rows #9, #11, and #15 to `is_accurate = 1`, `error_type = 'NONE'`).
+  2. *Per-Option 2-of-3 Bitwise Majority Voting (`backend/core/consensus.py`)*:
+     - Added `compute_multi_majority_indices(set_a, set_b, set_c, num_options)`: an option index $i$ is accepted if and only if at least 2 of the 3 models (Primary A, Primary B, Arbiter C) select it: $\sum_{m} (i \in S_m) \ge 2$.
+     - When Arbiter is offline or 429-exhausted, applies **Intersection Rescue** ($S_A \cap S_B$) to strip unverified single-model extra options.
+  3. *Hard Option Bounds Clamping & Code-Snippet Grounding*:
+     - Clamped `valid_indices` strictly to `0 <= idx < len(options)` in `normalize_multi_mcq_answer`.
+     - Injected `ANTI_HALLUCINATION_CODE_SECTION` into multi-select and stack/queue prompts to forbid models from substituting standard textbook implementations when specific code stems are provided.
+- **Verification Evidence**:
+  - 302 unit & integration tests passing 100% across all test suites (`pytest tests -q`).
+  - 23/23 tests passing in `tests/test_final_phase_telemetry_and_portability.py`.
+  - 8/8 tests passing in `tests/test_three_question_models.py`.
+  - 8/8 offline deterministic self-tests passing in `eval/run_eval.py --self-test`.
+
 ---
 *Document certified and anchored to QuizZy / Jivvu Core Architecture (2026).*
 

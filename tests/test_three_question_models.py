@@ -5,8 +5,11 @@ Unit and integration tests for the Three Question Models hardening:
 3. Fill-in-the-box questions (Numerical / textual answers)
 """
 
+import os
 import pytest
 from fastapi.testclient import TestClient
+
+os.environ["QUIZZY_OFFLINE_TEST_MODE"] = "1"
 
 from backend.app import app
 from backend.schemas import SolveRequest, SolveResponse

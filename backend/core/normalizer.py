@@ -1029,7 +1029,11 @@ def normalize_multi_mcq_answer(raw_answer: Any, options: List[str]) -> Normalize
     if not matched_indices:
         raise NormalizationError(f"Could not extract any valid multi-select options from: {raw_answer!r}")
 
-    sorted_indices = sorted(list(matched_indices))
+    valid_indices = [i for i in matched_indices if 0 <= i < len(options)]
+    if not valid_indices:
+        raise NormalizationError(f"Could not extract any valid multi-select options within bounds from: {raw_answer!r}")
+
+    sorted_indices = sorted(list(set(valid_indices)))
     canonical_keys = [chr(65 + i) for i in sorted_indices]
     canonical_key = ",".join(canonical_keys)
     selected_texts = [options[i] for i in sorted_indices]

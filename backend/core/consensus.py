@@ -60,6 +60,76 @@ def are_answers_in_consensus(
     return False
 
 
+def extract_multi_indices(norm: Optional[Any], num_options: int = 4) -> Set[int]:
+    """Extract integer option indices from a NormalizedAnswer or SolverResponse."""
+    if not norm:
+        return set()
+    valid_range = range(max(1, num_options))
+    indices = getattr(norm, "selected_indices", None)
+    if isinstance(indices, (list, tuple, set)):
+        return {int(i) for i in indices if int(i) in valid_range}
+    c_keys = getattr(norm, "canonical_keys", None)
+    if isinstance(c_keys, (list, tuple, set)):
+        res = set()
+        for k in c_keys:
+            s = str(k).strip().upper()
+            if len(s) == 1 and "A" <= s <= "P":
+                idx = ord(s) - 65
+                if idx in valid_range:
+                    res.add(idx)
+        if res:
+            return res
+    c_key = getattr(norm, "canonical_key", None)
+    if c_key:
+        res = set()
+        for p in re.split(r"[,;]+", str(c_key)):
+            s = p.strip().upper()
+            if len(s) == 1 and "A" <= s <= "P":
+                idx = ord(s) - 65
+                if idx in valid_range:
+                    res.add(idx)
+        return res
+    return set()
+
+
+def compute_multi_majority_indices(
+    set_a: Set[int],
+    set_b: Set[int],
+    set_c: Optional[Set[int]] = None,
+    num_options: int = 4,
+) -> Tuple[List[int], str]:
+    """
+    Compute Per-Option 2-of-3 Majority Vote or Intersection Rescue for multi-select.
+    Returns (sorted_indices, method).
+    """
+    valid_range = range(max(1, num_options))
+    sa = {i for i in set_a if i in valid_range}
+    sb = {i for i in set_b if i in valid_range}
+
+    if set_c is not None:
+        sc = {i for i in set_c if i in valid_range}
+        # 2-of-3 majority vote per option: option included if at least 2 models agree
+        majority = {i for i in valid_range if ((i in sa) + (i in sb) + (i in sc)) >= 2}
+        if majority:
+            return sorted(list(majority)), "majority_2_of_3"
+        # If no option got >= 2 votes, fall back to pairwise intersections
+        if sa & sb:
+            return sorted(list(sa & sb)), "intersection_ab"
+        if sa & sc:
+            return sorted(list(sa & sc)), "intersection_ac"
+        if sb & sc:
+            return sorted(list(sb & sc)), "intersection_bc"
+        return sorted(list(sa or sb or sc or {0})), "disjoint_fallback"
+
+    # Arbiter unavailable / 429: compute intersection of Primary A and Primary B
+    intersect = sa & sb
+    if intersect:
+        return sorted(list(intersect)), "intersection_rescue"
+
+    fallback = sa or sb or {0}
+    return sorted(list(fallback)), "primary_fallback"
+
+
 class SolverResponse(BaseModel):
     """Complete canonical solver response with Zero-DOM-Mutation readiness."""
     status: str  # "OK" or "UNCERTAIN"
@@ -141,6 +211,8 @@ async def run_groq_arbiter_fallback(
         "success": succ_arb,
         "error": err_arb,
         "canonical_key": norm_arb.canonical_key if norm_arb else None,
+        "selected_indices": norm_arb.selected_indices if norm_arb else None,
+        "canonical_keys": norm_arb.canonical_keys if norm_arb else None,
         "reason": parsed_arb.reason if parsed_arb else None,
         "latency_ms": el_arb,
     }

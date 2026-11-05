@@ -1,33 +1,30 @@
 # QuizZy / Jivvu Project State
 
-## Current Milestone: Final Production Release, 4 Exclusive Shortcuts & Panic Wipe
-- **Status**: Production-Ready / 298 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
+## Current Milestone: Multi-Select Bitwise Consensus & Telemetry Auditor Hardening
+- **Status**: Production-Ready / 302 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
 - **Primary Repository Remote**: `https://github.com/codewithjaswanth/Jivvu.git` (`main` branch).
 - **Core Production Upgrades Delivered**:
+  - **Multi-Select Consensus & Anti-Hallucination Engine (`backend/core/`)**:
+    - Per-Option 2-of-3 Bitwise Majority Voting (`compute_multi_majority_indices`): Evaluates $S_{\text{majority}} = \{ i \mid \sum_{m \in \{A, B, C\}} (i \in S_m) \ge 2 \}$ across Primary A, Primary B, and Arbiter C, stripping unverified single-model extra options.
+    - Intersection Rescue: When Arbiter is unavailable/429, falls back to $S_A \cap S_B$ to prevent unverified option hallucination.
+    - Option Bounds Clamp: Clamps `valid_indices` strictly to `0 <= idx < len(options)` in `normalize_multi_mcq_answer`.
+    - Strict Code-Snippet Grounding: Added `ANTI_HALLUCINATION_CODE_SECTION` to `MULTI_SELECT_PROMPT_SECTION` and `STACK_QUEUE_PROMPT_SECTION`, forcing models to reason solely on provided code variables rather than generic textbook implementations.
+  - **Telemetry Multi-Answer Auditor & Retrospective Repair (`backend/telemetry_db.py`, `backend/app.py`)**:
+    - Fixed false-positive `HALLUCINATED_OPTION` bug: parses comma-separated answers and validates each option/letter individually against options list.
+    - Retrospective Repair (`repair_historical_hallucinated_options`): Automatically heals false-positive rows in `telemetry.db` on startup; healed rows #9, #11, #15 to `is_accurate = 1`, `error_type = 'NONE'`.
   - **Manifest V3 Commands Fix & 4 Exclusive Shortcuts**:
-    - Fixed Chrome load error: pruned `manifest.json` commands to 2 (`soft_refresh` and `quizzy-uninstall-self`), strictly respecting `len(commands) <= 4`.
-    - Enforced 4 exclusive shortcuts codebase-wide: `Shift` (Auto Mode), `Ctrl` (Show/Hide HUD & Reset Dot), `Alt+R` (Soft Refresh), `Ctrl+Shift+Z` (Silent Panic Wipe).
-    - Pruned all legacy shortcuts (`Alt+S`, `Alt+A`, `Alt+N`, `Alt+M`, `Escape`, `Ctrl+Alt+0`, double-tap `Z`, double-tap `Alt`).
-  - **Zero-Error Telemetry Pipeline (`backend/`)**: Eliminated all 5 failure modes:
-    - `VALIDATION_ERROR`: `SolveRequest` `@model_validator` pre-sanitizer for null options, case-insensitive `q_type`, non-string option coercion, diagram/code fallback stem.
-    - `SCHEMA_PARSE_ERROR`: 5-stage defensive parser recovery (strip fences/tags, fast JSON, auto-repair unescaped newlines/truncated brackets, AST literal pass, regex field rescue).
-    - `HALLUCINATED_OPTION`: `snap_to_closest_option` SequenceMatcher & token-overlap fallback snapping to valid options; strict bounds post-checks.
-    - `LLM_TIMEOUT` & Speed: Persistent `httpx.AsyncClient` keep-alive pool saving 150-300ms TCP handshakes; immediate task cancellation on agreement.
-    - `RATE_LIMIT_429`: Proactive sliding-window header tracking; instant `< 5ms` model bucket rotation.
+    - Manifest V3 compliant: commands pruned to 2 (`soft_refresh`, `quizzy-uninstall-self`), strictly respecting `len(commands) <= 4`.
+    - 4 Exclusive Shortcuts: `Shift` (Auto Mode), `Ctrl` (HUD & Anchor), `Alt+R` (Soft Refresh), `Ctrl+Shift+Z` (Silent Panic Wipe).
   - **Silent Self-Uninstall ("Panic Wipe" on `Ctrl + Shift + Z`)**:
-    - Manifest V3 zero-intrusive self-removal via `chrome.management.uninstallSelf({ showConfirmDialog: false })`.
-    - Multi-context capture in `floating_hud.js`, `ccbp_lifecycle_bridge.js`, `sidepanel.js`, `executor.js`, and `manifest.json`.
-    - Deterministic 4-stage scrub: live DOM & listener wipe (`window.__QUIZZY_SELF_DESTRUCT_DOM__`), multi-tab broadcast, daemon stop (`:8000/shutdown`), and storage wipe.
+    - Zero-trace self-removal via `chrome.management.uninstallSelf({ showConfirmDialog: false })` with live DOM cleanup, daemon stop, and storage wipe.
   - **Multi-Laptop Portability (`setup.bat`, `setup.ps1`, `backend/native_host.py`)**:
-    - Purged hardcoded paths; dynamic repository-root resolution.
-    - Auto-compiles `native_host_win.cs` via built-in Windows `.NET` `csc.exe` if missing.
-    - Single-command setup with Recommended (`--recommended`, default) and Quick (`--quick`, `< 10s`) modes.
-  - **Executive-Grade Documentation**: Full rewrite of `README.md` with architectural pillars, ASCII flow diagrams, 4 exclusive shortcuts table, and setup guides.
+    - Zero hardcoded paths; dynamic repository-root resolution. Recommended and Quick setup modes.
 - **Active Daemons & Interfaces**:
   - Local Inference Backend (`127.0.0.1:8000`): Healthy and active (`/health` HTTP 200).
   - Observability Dashboard (`127.0.0.1:8765`): Healthy, active (`ON`), serving B2B SaaS interface.
 - **Test Integrity & Evidence**:
-  - Full Pytest Suite (`pytest tests -q`): 298 passed, 2 skipped, 1 warning (100% pass rate).
+  - Full Pytest Suite (`pytest tests -q`): 302 passed, 2 skipped, 1 warning (100% pass rate).
+  - Final Phase Telemetry Suite (`tests/test_final_phase_telemetry_and_portability.py`): 23/23 passed (100%).
+  - Three Question Models Suite (`tests/test_three_question_models.py`): 8/8 passed (100%).
   - Panic Wipe Suite (`tests/test_panic_wipe_uninstall.py`): 5/5 passed (100%).
-  - Final Phase Telemetry Suite (`tests/test_final_phase_telemetry_and_portability.py`): 19/19 passed (100%).
   - Offline Self-Test (`eval/run_eval.py --self-test`): 8/8 passed (100%).

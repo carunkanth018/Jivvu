@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -115,6 +116,83 @@ def init_db(db_path: Optional[Union[str, Path]] = None) -> None:
             )
     finally:
         conn.close()
+
+    # Automatically heal historical false-positive HALLUCINATED_OPTION entries
+    repair_historical_hallucinated_options(db_path)
+
+
+init_telemetry_db = init_db
+
+
+def repair_historical_hallucinated_options(db_path: Optional[Union[str, Path]] = None) -> int:
+    """
+    Retrospectively repair false-positive HALLUCINATED_OPTION records in telemetry.db
+    for multi and order questions where every letter/index maps to a valid option.
+    """
+    path = resolve_db_path(db_path)
+    if not path.is_file():
+        return 0
+
+    repaired_count = 0
+    try:
+        conn = get_db_connection(path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, q_type, options_json, selected_answer, canonical_key
+                FROM request_logs
+                WHERE error_type = 'HALLUCINATED_OPTION'
+                  AND (q_type IN ('multi', 'order', 'multi_mcq', 'multiselect') OR selected_answer LIKE '%,%')
+            """)
+            rows = cursor.fetchall()
+            for row in rows:
+                row_id = row["id"]
+                opts_json = row["options_json"]
+                sel_ans = row["selected_answer"] or row["canonical_key"] or ""
+                if not opts_json or not sel_ans:
+                    continue
+                try:
+                    options = json.loads(opts_json)
+                except Exception:
+                    continue
+                if not isinstance(options, list) or len(options) == 0:
+                    continue
+
+                parts = [p.strip().upper() for p in re.split(r"[,;>]+|->", str(sel_ans)) if p.strip()]
+                if not parts:
+                    continue
+
+                all_valid = True
+                for p in parts:
+                    if len(p) == 1 and p in "ABCDEFGHIJKLMNOP":
+                        idx = ord(p) - 65
+                        if not (0 <= idx < len(options)):
+                            all_valid = False
+                            break
+                    else:
+                        p_norm = re.sub(r"\s+", " ", p).strip().lower()
+                        if not any(re.sub(r"\s+", " ", str(o)).strip().lower() == p_norm for o in options):
+                            all_valid = False
+                            break
+
+                if all_valid:
+                    cursor.execute("""
+                        UPDATE request_logs
+                        SET error_type = 'NONE',
+                            status = 'SUCCESS',
+                            is_accurate = 1,
+                            error_message = NULL
+                        WHERE id = ?
+                    """, (row_id,))
+                    repaired_count += 1
+            if repaired_count > 0:
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Error running retrospective telemetry repair: %s", exc)
+
+    return repaired_count
 
 
 def get_system_setting(
@@ -732,7 +810,7 @@ def validate_accuracy_and_classify_error(
                 return True
             return False
 
-        # Validate index if given
+        # Validate index if given (for mcq, or anchor index for multi/order)
         if sel_idx is not None:
             if not isinstance(sel_idx, int) or sel_idx < 0 or sel_idx >= len(options):
                 return False, "HALLUCINATED_OPTION", "FAILURE"
@@ -749,18 +827,53 @@ def validate_accuracy_and_classify_error(
                 if not isinstance(idx, int) or idx < 0 or idx >= len(options):
                     return False, "HALLUCINATED_OPTION", "FAILURE"
 
-        # Validate text answer if present
-        if sel_text is not None and str(sel_text).strip():
-            if not opt_or_letter_matches(sel_text):
-                return False, "HALLUCINATED_OPTION", "FAILURE"
-        elif ans_val is not None and str(ans_val).strip() and sel_idx is None and not perm_indices and not sel_indices:
-            if q_type == "order":
-                parts = [p.strip() for p in str(ans_val).replace("->", ",").replace(">", ",").split(",") if p.strip()]
+        # Validate canonical_keys if provided
+        if canon_keys:
+            for k in canon_keys:
+                if not opt_or_letter_matches(k):
+                    return False, "HALLUCINATED_OPTION", "FAILURE"
+
+        # Validate selected_texts if provided
+        sel_texts_list = getattr(response, "selected_texts", None)
+        if sel_texts_list and isinstance(sel_texts_list, (list, tuple)):
+            for t in sel_texts_list:
+                if not opt_or_letter_matches(t):
+                    return False, "HALLUCINATED_OPTION", "FAILURE"
+
+        # Multi-Answer Validation: handle comma-separated options/letters without false-positive hallucination
+        is_multi_shape = (
+            q_type in ("multi", "multi_mcq", "multiselect")
+            or (canon_keys and len(canon_keys) > 1)
+            or (sel_indices and len(sel_indices) > 1)
+            or ("," in str(ans_val or "") and q_type != "order")
+        )
+
+        if is_multi_shape:
+            if ans_val is not None and str(ans_val).strip():
+                parts = [p.strip() for p in re.split(r"[,;]+", str(ans_val)) if p.strip()]
+                if not parts:
+                    return False, "EMPTY_ANSWER", "FAILURE"
+                for p in parts:
+                    if not opt_or_letter_matches(p):
+                        return False, "HALLUCINATED_OPTION", "FAILURE"
+            if sel_text is not None and str(sel_text).strip() and not sel_texts_list and not sel_indices:
+                parts = [p.strip() for p in re.split(r"[,;]+", str(sel_text)) if p.strip()]
+                for p in parts:
+                    if not opt_or_letter_matches(p):
+                        return False, "HALLUCINATED_OPTION", "FAILURE"
+        elif q_type == "order":
+            if ans_val is not None and str(ans_val).strip():
+                parts = [p.strip() for p in re.split(r"[,;>]+|->", str(ans_val)) if p.strip()]
                 if parts:
                     for p in parts:
                         if not opt_or_letter_matches(p):
                             return False, "HALLUCINATED_OPTION", "FAILURE"
-            else:
+        else:
+            # Single-choice MCQ or text validation
+            if sel_text is not None and str(sel_text).strip():
+                if not opt_or_letter_matches(sel_text):
+                    return False, "HALLUCINATED_OPTION", "FAILURE"
+            elif ans_val is not None and str(ans_val).strip() and sel_idx is None and not perm_indices and not sel_indices:
                 if not opt_or_letter_matches(ans_val):
                     return False, "HALLUCINATED_OPTION", "FAILURE"
 

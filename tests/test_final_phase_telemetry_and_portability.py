@@ -197,3 +197,132 @@ class TestPortabilityAndZeroSecretAudit:
                 assert "C:\\Users\\jassh" not in text, f"Hardcoded path found in {p.name}"
                 assert "c:\\Users\\jassh" not in text, f"Hardcoded path found in {p.name}"
 
+
+class TestMultiSelectConsensusAndTelemetryAuditor:
+    """Verifies per-option 2-of-3 consensus, intersection rescue, and telemetry auditor multi-answer validation."""
+
+    def test_telemetry_multi_answer_accuracy_audit(self):
+        from types import SimpleNamespace
+        from backend.telemetry_db import validate_accuracy_and_classify_error
+
+        options = [
+            "head = head->next",
+            "temp = head",
+            "delete temp",
+            "return head",
+        ]
+
+        # Valid multi-select answer response object
+        valid_resp = SimpleNamespace(
+            answer="A, C, D",
+            canonical_keys=["A", "C", "D"],
+            selected_texts=["head = head->next", "delete temp", "return head"],
+            selected_indices=[0, 2, 3],
+            status="ok",
+        )
+        is_acc, err, status = validate_accuracy_and_classify_error(
+            q_type="multi",
+            options=options,
+            response=valid_resp,
+        )
+        assert is_acc is True
+        assert err == "NONE"
+        assert status == "SUCCESS"
+
+        # Hallucinated option not in options list
+        bad_resp = SimpleNamespace(
+            answer="A, Z",
+            canonical_keys=["A", "Z"],
+            selected_texts=["head = head->next", "Non-existent hallucinated option"],
+            selected_indices=[0, 25],
+            status="ok",
+        )
+        is_acc_bad, err_bad, status_bad = validate_accuracy_and_classify_error(
+            q_type="multi",
+            options=options,
+            response=bad_resp,
+        )
+        assert is_acc_bad is False
+        assert err_bad == "HALLUCINATED_OPTION"
+        assert status_bad == "FAILURE"
+
+    def test_per_option_two_of_three_majority_voting(self):
+        from backend.core.consensus import compute_multi_majority_indices
+
+        # Primary A: {0, 2, 3}, Primary B: {0, 2}, Arbiter C: {0, 2} -> 3 stripped
+        indices, method = compute_multi_majority_indices({0, 2, 3}, {0, 2}, {0, 2}, 4)
+        assert indices == [0, 2]
+        assert method == "majority_2_of_3"
+
+        # Primary A: {0, 1}, Primary B: {1, 2}, Arbiter C: {0, 1, 2} -> all items supported by >= 2
+        indices2, method2 = compute_multi_majority_indices({0, 1}, {1, 2}, {0, 1, 2}, 4)
+        assert indices2 == [0, 1, 2]
+        assert method2 == "majority_2_of_3"
+
+    def test_intersection_rescue_when_arbiter_offline(self):
+        from backend.core.consensus import compute_multi_majority_indices
+
+        # Primary A: {1, 2, 3}, Primary B: {1, 2}, Arbiter is None -> intersection {1, 2}
+        indices, method = compute_multi_majority_indices({1, 2, 3}, {1, 2}, None, 4)
+        assert indices == [1, 2]
+        assert method == "intersection_rescue"
+
+        # Disjoint: Primary A: {0, 1}, Primary B: {2, 3}, Arbiter None -> falls back to A
+        indices_disjoint, method_disjoint = compute_multi_majority_indices({0, 1}, {2, 3}, None, 4)
+        assert indices_disjoint == [0, 1]
+        assert method_disjoint == "primary_fallback"
+
+    def test_retrospective_telemetry_db_repair(self, tmp_path):
+        import json
+        import sqlite3
+        from backend.telemetry_db import repair_historical_hallucinated_options
+
+        test_db = tmp_path / "test_telemetry.db"
+        conn = sqlite3.connect(str(test_db))
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                q_type TEXT,
+                options_json TEXT,
+                canonical_key TEXT,
+                selected_answer TEXT,
+                is_accurate INTEGER,
+                error_type TEXT,
+                status TEXT,
+                error_message TEXT
+            )
+        """)
+        # Row 1: False positive HALLUCINATED_OPTION on valid multi answer
+        cur.execute(
+            """
+            INSERT INTO request_logs (
+                q_type, options_json, canonical_key, selected_answer, is_accurate, error_type, status, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "multi",
+                json.dumps(["Opt 1", "Opt 2", "Opt 3"]),
+                "A, C",
+                "A, C",
+                0,
+                "HALLUCINATED_OPTION",
+                "FAILURE",
+                "Falsely marked hallucinated",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        repaired = repair_historical_hallucinated_options(test_db)
+        assert repaired == 1
+
+        conn = sqlite3.connect(str(test_db))
+        cur = conn.cursor()
+        cur.execute("SELECT is_accurate, error_type, status FROM request_logs WHERE id = 1")
+        row = cur.fetchone()
+        conn.close()
+
+        assert row == (1, "NONE", "SUCCESS")
+
+

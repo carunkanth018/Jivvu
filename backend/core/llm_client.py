@@ -94,6 +94,8 @@ from backend.core.providers import (
 # Re-export consensus, arbiters, fixtures, and responses
 from backend.core.consensus import (
     SolverResponse,
+    compute_multi_majority_indices,
+    extract_multi_indices,
     run_groq_arbiter_fallback,
     run_hedged_openrouter_fallback,
     solve_offline_fixture,
@@ -1260,18 +1262,44 @@ async def solve_question(
                             models_called.extend(arb_models)
                             agreement_details["groq_arbiter"] = arb_details
                             if arb_sol is not None:
-                                norm_arb_key = arb_details.get("canonical_key")
-                                norm_a_key = norm_a.canonical_key if norm_a else None
-                                norm_b_key = norm_b.canonical_key if norm_b else None
-                                if (norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key)) or norm_arb_key:
-                                    for p in pending_set:
-                                        p.cancel()
-                                    total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                                    arb_sol.latency_ms = total_elapsed_ms
-                                    arb_sol.models_called = models_called
-                                    arb_sol.agreement_details = agreement_details
-                                    arb_sol.confidence_tier = "MEDIUM_TIEBREAKER_AGREE"
-                                    return arb_sol
+                                if q_type in ("multi", "multi_mcq", "multiselect"):
+                                    sa = extract_multi_indices(norm_a, len(options))
+                                    sb = extract_multi_indices(norm_b, len(options))
+                                    sc = extract_multi_indices(arb_sol, len(options))
+                                    maj_indices, method = compute_multi_majority_indices(sa, sb, sc, len(options))
+                                    if maj_indices:
+                                        for p in pending_set:
+                                            p.cancel()
+                                        total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                                        c_keys = [chr(65 + i) for i in maj_indices]
+                                        s_texts = [options[i] for i in maj_indices]
+                                        return SolverResponse(
+                                            status="OK",
+                                            confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                                            canonical_key=", ".join(c_keys),
+                                            selected_index=maj_indices[0],
+                                            selected_text=", ".join(s_texts),
+                                            selected_indices=maj_indices,
+                                            selected_texts=s_texts,
+                                            canonical_keys=c_keys,
+                                            reason=arb_sol.reason or (parsed_a.reason if parsed_a else "") or f"Per-option 2-of-3 majority voting ({method}).",
+                                            latency_ms=total_elapsed_ms,
+                                            models_called=models_called,
+                                            agreement_details=agreement_details,
+                                        )
+                                else:
+                                    norm_arb_key = arb_details.get("canonical_key")
+                                    norm_a_key = norm_a.canonical_key if norm_a else None
+                                    norm_b_key = norm_b.canonical_key if norm_b else None
+                                    if (norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key)) or norm_arb_key:
+                                        for p in pending_set:
+                                            p.cancel()
+                                        total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                                        arb_sol.latency_ms = total_elapsed_ms
+                                        arb_sol.models_called = models_called
+                                        arb_sol.agreement_details = agreement_details
+                                        arb_sol.confidence_tier = "MEDIUM_TIEBREAKER_AGREE"
+                                        return arb_sol
                         except Exception:
                             pass
                     elif finished is or_task:
@@ -1280,17 +1308,65 @@ async def solve_question(
                             models_called.extend(fb_models_called)
                             agreement_details["fallback"] = fb_details
                             if hedged_sol is not None:
-                                for p in pending_set:
-                                    p.cancel()
-                                total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                                hedged_sol.latency_ms = total_elapsed_ms
-                                hedged_sol.models_called = models_called
-                                hedged_sol.agreement_details = agreement_details
-                                return hedged_sol
+                                if q_type in ("multi", "multi_mcq", "multiselect"):
+                                    sa = extract_multi_indices(norm_a, len(options))
+                                    sb = extract_multi_indices(norm_b, len(options))
+                                    sc = extract_multi_indices(hedged_sol, len(options))
+                                    maj_indices, method = compute_multi_majority_indices(sa, sb, sc, len(options))
+                                    if maj_indices:
+                                        for p in pending_set:
+                                            p.cancel()
+                                        total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                                        c_keys = [chr(65 + i) for i in maj_indices]
+                                        s_texts = [options[i] for i in maj_indices]
+                                        return SolverResponse(
+                                            status="OK",
+                                            confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                                            canonical_key=", ".join(c_keys),
+                                            selected_index=maj_indices[0],
+                                            selected_text=", ".join(s_texts),
+                                            selected_indices=maj_indices,
+                                            selected_texts=s_texts,
+                                            canonical_keys=c_keys,
+                                            reason=hedged_sol.reason or (parsed_a.reason if parsed_a else "") or f"Per-option 2-of-3 majority voting ({method}).",
+                                            latency_ms=total_elapsed_ms,
+                                            models_called=models_called,
+                                            agreement_details=agreement_details,
+                                        )
+                                else:
+                                    for p in pending_set:
+                                        p.cancel()
+                                    total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                                    hedged_sol.latency_ms = total_elapsed_ms
+                                    hedged_sol.models_called = models_called
+                                    hedged_sol.agreement_details = agreement_details
+                                    return hedged_sol
                         except Exception:
                             pass
 
             total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            if q_type in ("multi", "multi_mcq", "multiselect"):
+                sa = extract_multi_indices(norm_a, len(options))
+                sb = extract_multi_indices(norm_b, len(options))
+                intersect_indices, method = compute_multi_majority_indices(sa, sb, None, len(options))
+                if intersect_indices:
+                    c_keys = [chr(65 + i) for i in intersect_indices]
+                    s_texts = [options[i] for i in intersect_indices]
+                    return SolverResponse(
+                        status="OK",
+                        confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                        canonical_key=", ".join(c_keys),
+                        selected_index=intersect_indices[0],
+                        selected_text=", ".join(s_texts),
+                        selected_indices=intersect_indices,
+                        selected_texts=s_texts,
+                        canonical_keys=c_keys,
+                        reason=(parsed_a.reason if parsed_a else "") or (parsed_b.reason if parsed_b else "") or f"Intersection consensus rescue ({method}).",
+                        latency_ms=total_elapsed_ms,
+                        models_called=models_called,
+                        agreement_details=agreement_details,
+                    )
+
             chosen_norm = norm_a if norm_a else norm_b
             chosen_parsed = parsed_a if chosen_norm is norm_a else parsed_b
             return SolverResponse(

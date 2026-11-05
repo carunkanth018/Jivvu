@@ -843,7 +843,7 @@ async def _solve_core(
                 final_canonical_keys = [chr(65 + idx) for idx in final_sel_indices]
                 final_sel_idx = final_sel_indices[0]
                 final_sel_text = ", ".join(final_sel_texts)
-                answer_val = ",".join(final_canonical_keys)
+                answer_val = ", ".join(final_canonical_keys)
 
         response = SolveResponse(
             status="ok" if is_ok else "uncertain",
