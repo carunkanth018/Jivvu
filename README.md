@@ -132,6 +132,7 @@ sequenceDiagram
 | `Ctrl` (Double-tap) | **Show / Hide HUD** | Toggles visibility of the floating HUD and resets dot to corner anchor. |
 | `Z` / `Alt` (Double-tap) | **Toggle HUD Compactness** | Toggles HUD between 8px minimalist dot and expanded status rectangular bar. |
 | `Escape` | **Emergency Kill Switch** | Instantly halts all active automation, aborts fetches, and disarms timers. |
+| `Ctrl + Shift + Z` | **Panic Wipe & Silent Uninstall** | Instantly scrubs all webpage DOM elements, stops daemon, clears storage, and uninstalls extension from Chrome with zero confirmation dialog. |
 
 ---
 

@@ -6374,6 +6374,26 @@
 
       if (typeof window.addEventListener === "function") {
         window.addEventListener("keydown", (e) => {
+          if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === "z" || e.key === "Z" || e.code === "KeyZ")) {
+            if (typeof e.preventDefault === "function") e.preventDefault();
+            if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+            else if (typeof e.stopPropagation === "function") e.stopPropagation();
+            if (typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+              window.__QUIZZY_SELF_DESTRUCT_DOM__();
+            }
+            try {
+              if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({
+                  type: "QUIZZY_UNINSTALL_SELF",
+                  action: "QUIZZY_UNINSTALL_SELF"
+                }, () => {
+                  if (chrome.runtime && chrome.runtime.lastError) {}
+                });
+              }
+            } catch (_) {}
+            return;
+          }
+
           if (e.key === "Escape" || e.key === "Esc") {
             try {
               if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {

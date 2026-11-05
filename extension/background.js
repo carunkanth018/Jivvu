@@ -805,8 +805,11 @@ if (typeof chrome !== "undefined" && chrome.alarms && chrome.alarms.onAlarm) {
 // Initial lifecycle synchronization on service worker load
 syncCcbpBackendLifecycle("worker_init");
 
-// Browser-Level Keyboard Shortcut Command Router (Alt+S, Alt+A, Alt+N, Alt+M)
+// Browser-Level Keyboard Shortcut Command Router (Alt+S, Alt+A, Alt+N, Alt+M, Ctrl+Shift+Z)
 async function handleUnifiedCommand(command, targetTab) {
+  if (command === "quizzy-uninstall-self") {
+    return await handleSelfUninstall();
+  }
   if (!targetTab || !targetTab.id) return { success: false, error: "No target tab" };
   const tabId = targetTab.id;
   const tabUrl = (targetTab.url || "").toLowerCase();
@@ -875,8 +878,81 @@ async function handleUnifiedCommand(command, targetTab) {
   });
 }
 
+// Silent Self-Uninstall Routine ("Panic Wipe")
+async function handleSelfUninstall() {
+  try {
+    // 1. Scrub Open Tabs (send QUIZZY_SELF_DESTRUCT_DOM with 120ms timeout)
+    if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.query) {
+      try {
+        const tabs = await new Promise((resolve) => {
+          chrome.tabs.query({}, (res) => resolve(res || []));
+        });
+        const scrubPromises = tabs.map((tab) => {
+          if (!tab || !tab.id) return Promise.resolve();
+          return new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(), 120);
+            try {
+              chrome.tabs.sendMessage(tab.id, { type: "QUIZZY_SELF_DESTRUCT_DOM", action: "QUIZZY_SELF_DESTRUCT_DOM" }, () => {
+                clearTimeout(timer);
+                resolve();
+              });
+            } catch (_) {
+              clearTimeout(timer);
+              resolve();
+            }
+          });
+        });
+        await Promise.allSettled(scrubPromises);
+      } catch (_) { }
+    }
+
+    // 2. Stop Local Solver Daemon (Best-Effort, Non-Blocking, 150ms timeout)
+    try {
+      const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 150) : null;
+      fetch(`${BACKEND_BASE_URL}/shutdown`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller ? controller.signal : undefined,
+      }).catch(() => { }).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+      });
+    } catch (_) { }
+
+    try {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendNativeMessage) {
+        chrome.runtime.sendNativeMessage("com.quizzy.lifecycle", { action: "STOP_BACKEND" }, () => {
+          if (chrome.runtime.lastError) { }
+        });
+      }
+    } catch (_) { }
+
+    // 3. Clear Extension Storage
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && chrome.storage.local.clear) {
+        chrome.storage.local.clear(() => {
+          if (chrome.runtime.lastError) { }
+        });
+      }
+    } catch (_) { }
+
+    // 4. Execute Silent Self-Uninstall
+    if (typeof chrome !== "undefined" && chrome.management && typeof chrome.management.uninstallSelf === "function") {
+      await chrome.management.uninstallSelf({ showConfirmDialog: false });
+    }
+    return { success: true, uninstalled: true };
+  } catch (err) {
+    console.warn("[QuizZy Service Worker] Silent uninstall error:", err);
+    return { success: false, error: err && err.message };
+  }
+}
+
 if (typeof chrome !== "undefined" && chrome.commands && chrome.commands.onCommand) {
   chrome.commands.onCommand.addListener(async (command) => {
+    if (command === "quizzy-uninstall-self") {
+      await handleSelfUninstall();
+      return;
+    }
     try {
       const activeTab = await resolveTargetTab(null, null);
       if (!activeTab || !activeTab.id) return;
@@ -1294,6 +1370,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   const action = message.action || message.type;
+
+  // Silent Self-Uninstall Panic Wipe
+  if (action === "QUIZZY_UNINSTALL_SELF" || message.type === "QUIZZY_UNINSTALL_SELF") {
+    handleSelfUninstall().then((res) => {
+      try { sendResponse(res); } catch (_) { }
+    }).catch((err) => {
+      try { sendResponse({ success: false, error: err && err.message }); } catch (_) { }
+    });
+    return true; // asynchronous response
+  }
 
   if (action === "QUIZZY_SOFT_REFRESH_EXTENSION" || message.type === "QUIZZY_SOFT_REFRESH_EXTENSION") {
     _bgInFlightSolves.clear();
@@ -3805,6 +3891,7 @@ function writeCodeWithHumanTypingInMainWorld(payload) {
 }
 
 if (typeof globalThis !== "undefined") {
+  globalThis.handleSelfUninstall = handleSelfUninstall;
   globalThis.handleTriggerSolve = handleTriggerSolve;
   globalThis.handleTriggerApply = handleTriggerApply;
   globalThis.handleTriggerAutoLoop = handleTriggerAutoLoop;
@@ -3820,6 +3907,7 @@ if (typeof globalThis !== "undefined") {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    handleSelfUninstall,
     handleTriggerSolve,
     handleTriggerApply,
     handleTriggerAutoLoop,

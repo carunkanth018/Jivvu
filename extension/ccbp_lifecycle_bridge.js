@@ -120,6 +120,19 @@
       stopHeartbeatLoop();
       notifyUnload();
     }, bridgeSignal ? { signal: bridgeSignal, capture: true } : { capture: true });
+
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!message) return;
+        if (message.action === "QUIZZY_SELF_DESTRUCT_DOM" || message.type === "QUIZZY_SELF_DESTRUCT_DOM") {
+          stopHeartbeatLoop();
+          if (typeof window !== "undefined" && typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+            window.__QUIZZY_SELF_DESTRUCT_DOM__();
+          }
+          if (typeof sendResponse === "function") sendResponse({ success: true, destructed: true });
+        }
+      });
+    }
   }
 
   // 5. Solo Shift Key Listener to enable Auto Mode if HUD is not yet mounted
@@ -138,6 +151,26 @@
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("keydown", (e) => {
       if (!e || e.__quizzy_handled__) return;
+
+      // Ctrl + Shift + Z: Silent Self-Uninstall ("Panic Wipe")
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === "z" || e.key === "Z" || e.code === "KeyZ")) {
+        if (typeof e.preventDefault === "function") e.preventDefault();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        else if (typeof e.stopPropagation === "function") e.stopPropagation();
+        e.__quizzy_handled__ = true;
+        bridgeShiftComboUsed = true;
+        if (typeof window !== "undefined" && typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+          window.__QUIZZY_SELF_DESTRUCT_DOM__();
+        }
+        try {
+          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "QUIZZY_UNINSTALL_SELF", action: "QUIZZY_UNINSTALL_SELF" }, () => {
+              if (chrome.runtime && chrome.runtime.lastError) { }
+            });
+          }
+        } catch (_) { }
+        return;
+      }
 
       // Alt + R: In-Place Extension Soft Refresh
       if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "r" || e.key === "R" || e.code === "KeyR")) {

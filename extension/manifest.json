@@ -85,6 +85,12 @@
         "default": "Alt+M"
       },
       "description": "Open detached stealth Popup HUD"
+    },
+    "quizzy-uninstall-self": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Z"
+      },
+      "description": "Silent self-uninstall and panic wipe"
     }
   }
 }

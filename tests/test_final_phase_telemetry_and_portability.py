@@ -196,3 +196,4 @@ class TestPortabilityAndZeroSecretAudit:
                 text = p.read_text(encoding="utf-8", errors="ignore")
                 assert "C:\\Users\\jassh" not in text, f"Hardcoded path found in {p.name}"
                 assert "c:\\Users\\jassh" not in text, f"Hardcoded path found in {p.name}"
+

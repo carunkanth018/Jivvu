@@ -946,6 +946,28 @@ tests/test_real_screenshots_demo.py: 4 passed
   - 19/19 telemetry & portability audit tests passing in `tests/test_final_phase_telemetry_and_portability.py`.
   - 8/8 offline deterministic self-tests passing in `eval/run_eval.py --self-test`.
 
+### 7. Silent Self-Uninstall ("Panic Wipe") Engine (`Ctrl + Shift + Z`)
+- **Objective**: Immediate, complete removal of the QuizZy extension from Google Chrome (`chrome://extensions`, toolbar, shortcuts) and thorough elimination of all visual, DOM, and runtime traces without displaying any confirmation dialogs.
+- **Zero-Permission Architecture**:
+  - Leverages Manifest V3 `chrome.management.uninstallSelf({ showConfirmDialog: false })`.
+  - Crucially, MV3 allows an extension to uninstall *itself* without declaring `"management"` in `"permissions"`, preserving a strict zero-intrusive permission footprint.
+- **Global Shortcut Capture**:
+  - Registered as `"quizzy-uninstall-self"` in `extension/manifest.json` under `"commands"` bound to `Ctrl+Shift+Z`.
+  - Multi-context keyboard listeners across `extension/floating_hud.js` (`onGlobalKeyDown`, `onStealthCodingKeyDown`), `extension/ccbp_lifecycle_bridge.js`, `extension/sidepanel.js`, and `extension/executor.js` immediately invoke `e.preventDefault()`, `e.stopImmediatePropagation()`, and execute the local scrub routine.
+- **Deterministic 4-Stage Scrub Sequence**:
+  1. **Live DOM & Listener Scrub (`window.__QUIZZY_SELF_DESTRUCT_DOM__`)**:
+     - Halts Auto Mode (`isAutoRunning = false`) and stops Portal Completion (`QuizZyPortalCompletion.stop()`).
+     - Clears all recurring intervals and timers (`healthInterval`, `pollInterval`, `heartbeatTimer`, `backendPollTimer`).
+     - Aborts all active `AbortController` instances (`activeExecutionAbortController`, `activeHudAbortController`).
+     - Detaches all captured keyboard, pointer, and blur event listeners.
+     - Removes `#__quizzy_hud_host__`, `#quizzy-optin-highlight-styles`, `.quizzy-optin-winner`, and all dataset attributes (`[data-quizzy-highlight]`, `[data-quizzy-selected]`, `[data-quizzy-multi-checked]`).
+     - Nulls out all isolated-world globals (`window.__QUIZZY_*`, `window.QuizZy*`).
+  2. **Multi-Tab Broadcast**: Service worker broadcasts `{ type: "QUIZZY_SELF_DESTRUCT_DOM" }` across all open browser tabs via `chrome.tabs.sendMessage` with a bounded 120ms timeout.
+  3. **Non-Blocking Daemon Termination**: Fires a best-effort `150ms`-timeout HTTP `POST http://127.0.0.1:8000/shutdown` and native message `com.quizzy.lifecycle` (`STOP_BACKEND`) to cleanly shut down any local inference processes without delaying uninstallation if offline.
+  4. **Silent Extension Removal**: Clears `chrome.storage.local` and executes `chrome.management.uninstallSelf({ showConfirmDialog: false })`.
+- **Verification Evidence**:
+  - 5/5 dedicated unit & Node.js VM execution tests passing in `tests/test_panic_wipe_uninstall.py`.
+
 ---
 *Document certified and anchored to QuizZy / Jivvu Core Architecture (2026).*
 

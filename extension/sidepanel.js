@@ -1900,11 +1900,20 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Global Keyboard Shortcuts in Sidepanel (Alt+S, Alt+A, Alt+N, Alt+K, Alt+O, Alt+M)
+  // Global Keyboard Shortcuts in Sidepanel (Alt+S, Alt+A, Alt+N, Alt+K, Alt+O, Alt+M, Ctrl+Shift+Z)
   document.addEventListener("keydown", (e) => {
     if (!e) return;
     const key = (e.key || "").toLowerCase();
     const code = e.code || "";
+
+    // Ctrl + Shift + Z: Silent Self-Uninstall ("Panic Wipe")
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (key === "z" || code === "KeyZ")) {
+      e.preventDefault();
+      if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+      safeSendMessage({ action: "QUIZZY_UNINSTALL_SELF", type: "QUIZZY_UNINSTALL_SELF" });
+      try { window.close(); } catch (_) { }
+      return;
+    }
 
     if ((e.altKey && (key === "s" || code === "KeyS" || key === "x")) || (e.ctrlKey && e.shiftKey && (key === "x" || code === "KeyX"))) {
       e.preventDefault();

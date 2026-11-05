@@ -173,6 +173,134 @@
     } catch (_) { }
   }
 
+  // ==========================================================================
+  // Silent Self-Destruct DOM Routine ("Panic Wipe")
+  // ==========================================================================
+  function selfDestructDom() {
+    try {
+      // 1. Stop Auto Mode & Portal Completion
+      try {
+        if (typeof stopAutoMode === "function") stopAutoMode("Self-uninstall panic wipe");
+      } catch (_) {}
+      if (typeof isAutoRunning !== "undefined") isAutoRunning = false;
+      if (typeof window !== "undefined") {
+        if (window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.stop === "function") {
+          try { window.QuizZyPortalCompletion.stop(); } catch (_) {}
+        }
+      }
+      if (typeof portalCompletionActive !== "undefined") portalCompletionActive = false;
+
+      // 2. Clear intervals, timers & abort controllers
+      if (typeof healthInterval !== "undefined" && healthInterval) {
+        clearInterval(healthInterval);
+        healthInterval = null;
+      }
+      if (typeof pollInterval !== "undefined" && pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+      if (typeof heartbeatTimer !== "undefined" && heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      if (typeof backendPollTimer !== "undefined" && backendPollTimer) {
+        clearInterval(backendPollTimer);
+        backendPollTimer = null;
+      }
+      if (activeHudAbortController) {
+        try { activeHudAbortController.abort("Self-destruct"); } catch (_) {}
+        activeHudAbortController = null;
+      }
+      if (typeof activeExecutionAbortController !== "undefined" && activeExecutionAbortController) {
+        try { activeExecutionAbortController.abort("Self-destruct"); } catch (_) {}
+        activeExecutionAbortController = null;
+      }
+
+      // 3. Detach listeners
+      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+        if (typeof onGlobalKeyDown === "function") {
+          try { window.removeEventListener("keydown", onGlobalKeyDown, true); } catch (_) {}
+        }
+        if (typeof onGlobalKeyUp === "function") {
+          try { window.removeEventListener("keyup", onGlobalKeyUp, true); } catch (_) {}
+        }
+        if (typeof onGlobalPointerDown === "function") {
+          try { window.removeEventListener("pointerdown", onGlobalPointerDown, true); } catch (_) {}
+        }
+        if (typeof resetGlobalModifierStates === "function") {
+          try { window.removeEventListener("blur", resetGlobalModifierStates); } catch (_) {}
+        }
+        if (typeof window.__QUIZZY_STEALTH_SHORTCUT_HANDLER__ === "function") {
+          try { window.removeEventListener("keydown", window.__QUIZZY_STEALTH_SHORTCUT_HANDLER__, true); } catch (_) {}
+        }
+      }
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        if (typeof onGlobalKeyDown === "function") {
+          try { document.removeEventListener("keydown", onGlobalKeyDown, true); } catch (_) {}
+        }
+        if (typeof onGlobalKeyUp === "function") {
+          try { document.removeEventListener("keyup", onGlobalKeyUp, true); } catch (_) {}
+        }
+        if (typeof onGlobalPointerDown === "function") {
+          try { document.removeEventListener("pointerdown", onGlobalPointerDown, true); } catch (_) {}
+        }
+        if (typeof resetGlobalModifierStates === "function") {
+          try { document.removeEventListener("blur", resetGlobalModifierStates); } catch (_) {}
+        }
+      }
+
+      // 4. Remove DOM elements and highlights
+      const doc = (typeof document !== "undefined") ? document : null;
+      if (doc) {
+        const hosts = doc.querySelectorAll ? Array.from(doc.querySelectorAll(`#${HOST_ID}, [data-quizzy-hud-host], [id*="quizzy_hud"]`)) : [];
+        const hostById = (typeof doc.getElementById === "function") ? doc.getElementById(HOST_ID) : null;
+        if (hostById && !hosts.includes(hostById)) hosts.push(hostById);
+        for (const h of hosts) {
+          try {
+            if (h.parentNode && typeof h.parentNode.removeChild === "function") h.parentNode.removeChild(h);
+            else if (typeof h.remove === "function") h.remove();
+          } catch (_) {}
+        }
+
+        const styles = (typeof doc.getElementById === "function") ? doc.getElementById("quizzy-optin-highlight-styles") : null;
+        if (styles) {
+          try {
+            if (styles.parentNode && typeof styles.parentNode.removeChild === "function") styles.parentNode.removeChild(styles);
+            else if (typeof styles.remove === "function") styles.remove();
+          } catch (_) {}
+        }
+
+        if (doc.querySelectorAll) {
+          try {
+            doc.querySelectorAll(".quizzy-optin-winner").forEach(el => el.classList.remove("quizzy-optin-winner"));
+          } catch (_) {}
+          try {
+            doc.querySelectorAll("[data-quizzy-highlight]").forEach(el => el.removeAttribute("data-quizzy-highlight"));
+          } catch (_) {}
+          try {
+            doc.querySelectorAll("[data-quizzy-selected]").forEach(el => el.removeAttribute("data-quizzy-selected"));
+          } catch (_) {}
+          try {
+            doc.querySelectorAll("[data-quizzy-multi-checked]").forEach(el => el.removeAttribute("data-quizzy-multi-checked"));
+          } catch (_) {}
+        }
+      }
+
+      // 5. Null out window globals
+      if (typeof window !== "undefined") {
+        Object.keys(window).forEach(k => {
+          if (k.startsWith("__QUIZZY_") || k.startsWith("QuizZy")) {
+            try { window[k] = null; } catch (_) {}
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
+  if (typeof window !== "undefined") {
+    window.__QUIZZY_SELF_DESTRUCT_DOM__ = selfDestructDom;
+  }
+
   // Hook SPA navigation transitions without monkey-patching prototypes or duplicate listeners
   function setupSpaNavigationListeners() {
     if (typeof window === "undefined") return;
@@ -811,6 +939,26 @@
 
     const onStealthCodingKeyDown = function (e) {
       if (!e) return;
+
+      // Ctrl + Shift + Z: Silent Self-Uninstall ("Panic Wipe")
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === "z" || e.key === "Z" || e.code === "KeyZ")) {
+        if (typeof e.preventDefault === "function") e.preventDefault();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        else if (typeof e.stopPropagation === "function") e.stopPropagation();
+        e.__quizzy_handled__ = true;
+        ctrlComboUsed = true;
+        shiftComboUsed = true;
+        if (typeof window !== "undefined" && typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+          window.__QUIZZY_SELF_DESTRUCT_DOM__();
+        }
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ type: "QUIZZY_UNINSTALL_SELF", action: "QUIZZY_UNINSTALL_SELF" }, () => {
+            if (chrome.runtime && chrome.runtime.lastError) {}
+          });
+        }
+        return;
+      }
+
       const hud = getActiveCodingHudInstance();
       if (e.key === "Escape" || e.key === "Esc") {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
@@ -3616,6 +3764,22 @@
 
   function onGlobalKeyDown(e) {
     if (!e) return;
+
+    // Ctrl + Shift + Z: Silent Self-Uninstall ("Panic Wipe")
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === "z" || e.key === "Z" || e.code === "KeyZ")) {
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+      else if (typeof e.stopPropagation === "function") e.stopPropagation();
+      e.__quizzy_handled__ = true;
+      ctrlComboUsed = true;
+      shiftComboUsed = true;
+      if (typeof window !== "undefined" && typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+        window.__QUIZZY_SELF_DESTRUCT_DOM__();
+      }
+      sendExtensionMessage({ type: "QUIZZY_UNINSTALL_SELF", action: "QUIZZY_UNINSTALL_SELF" });
+      return;
+    }
+
     if (e.key === "Escape" || e.key === "Esc") {
       ctrlComboUsed = true;
       shiftComboUsed = true;
@@ -3874,8 +4038,18 @@
     if (typeof window !== "undefined" && !window.__QUIZZY_HUD_MSG_LISTENER__) {
       window.__QUIZZY_HUD_MSG_LISTENER__ = true;
       chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (!message || !message.action) return false;
-        if (message.action === "QUIZZY_ROUTE_CHANGED") {
+        if (!message || (!message.action && !message.type)) return false;
+        const msgAction = message.action || message.type;
+        if (msgAction === "QUIZZY_SELF_DESTRUCT_DOM") {
+          if (typeof window !== "undefined" && typeof window.__QUIZZY_SELF_DESTRUCT_DOM__ === "function") {
+            window.__QUIZZY_SELF_DESTRUCT_DOM__();
+          } else if (typeof selfDestructDom === "function") {
+            selfDestructDom();
+          }
+          if (typeof sendResponse === "function") sendResponse({ success: true, destructed: true });
+          return;
+        }
+        if (msgAction === "QUIZZY_ROUTE_CHANGED") {
           if (typeof window.__QUIZZY_HUD_ON_NAVIGATION__ === "function") {
             window.__QUIZZY_HUD_ON_NAVIGATION__(message.url);
           } else if (isProctoredCodingPage() || (message.url && /\/question\/[a-z0-9-]+/i.test(message.url))) {
@@ -3991,6 +4165,7 @@
     get autoErrorMessage() { return autoErrorMessage; },
     updateDotState,
     checkHealth,
+    selfDestructDom,
     setSidePanelOpen: (val) => {
       isSidePanelOpen = Boolean(val);
       if (isSidePanelOpen) hide();
@@ -4012,25 +4187,7 @@
     },
     getPortalCompletionActive: () => portalCompletionActive,
     togglePortalCompletion,
-    destroy: () => {
-      if (healthInterval) {
-        clearInterval(healthInterval);
-        healthInterval = null;
-      }
-      if (activeHudAbortController) {
-        try { activeHudAbortController.abort("HUD Destroyed"); } catch (_) {}
-      }
-      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
-        window.removeEventListener("keydown", onGlobalKeyDown, true);
-        window.removeEventListener("keyup", onGlobalKeyUp, true);
-        window.removeEventListener("pointerdown", onGlobalPointerDown, true);
-        window.removeEventListener("blur", resetGlobalModifierStates);
-      }
-      if (host && host.parentNode) {
-        host.parentNode.removeChild(host);
-      }
-      delete window.__QUIZZY_HUD_INSTANCE__;
-    }
+    destroy: selfDestructDom
   };
 
   window.__QUIZZY_HUD_INSTANCE__ = hudInstance;
