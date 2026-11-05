@@ -158,22 +158,47 @@ def repair_historical_hallucinated_options(db_path: Optional[Union[str, Path]] =
                 if not isinstance(options, list) or len(options) == 0:
                     continue
 
-                parts = [p.strip().upper() for p in re.split(r"[,;>]+|->", str(sel_ans)) if p.strip()]
+                clean_ans = str(sel_ans).strip()
+                if clean_ans.startswith("[") and clean_ans.endswith("]"):
+                    try:
+                        parsed_arr = json.loads(clean_ans)
+                        if isinstance(parsed_arr, list):
+                            parts = [str(x).strip().strip("'\"[]()").upper() for x in parsed_arr if str(x).strip()]
+                        else:
+                            parts = [p.strip().strip("'\"[]()").upper() for p in re.split(r"[,;>]+|->", clean_ans) if p.strip()]
+                    except Exception:
+                        parts = [p.strip().strip("'\"[]()").upper() for p in re.split(r"[,;>]+|->", clean_ans) if p.strip()]
+                else:
+                    parts = [p.strip().strip("'\"[]()").upper() for p in re.split(r"[,;>]+|->", clean_ans) if p.strip()]
+
                 if not parts:
                     continue
 
                 all_valid = True
                 for p in parts:
-                    if len(p) == 1 and p in "ABCDEFGHIJKLMNOP":
+                    if p.isdigit():
+                        idx = int(p)
+                        if not (0 <= idx < len(options)):
+                            all_valid = False
+                            break
+                    elif len(p) == 1 and p in "ABCDEFGHIJKLMNOP":
                         idx = ord(p) - 65
                         if not (0 <= idx < len(options)):
                             all_valid = False
                             break
                     else:
-                        p_norm = re.sub(r"\s+", " ", p).strip().lower()
-                        if not any(re.sub(r"\s+", " ", str(o)).strip().lower() == p_norm for o in options):
-                            all_valid = False
-                            break
+                        # Strip prefixes like "Option A"
+                        m = re.match(r"^(?:OPTION|CHOICE)?\s*([A-P])(?:[\.\:\)]|$)", p)
+                        if m:
+                            idx = ord(m.group(1)) - 65
+                            if not (0 <= idx < len(options)):
+                                all_valid = False
+                                break
+                        else:
+                            p_norm = re.sub(r"\s+", " ", p).strip().lower()
+                            if not any(re.sub(r"\s+", " ", str(o)).strip().lower() == p_norm for o in options):
+                                all_valid = False
+                                break
 
                 if all_valid:
                     cursor.execute("""
@@ -797,17 +822,26 @@ def validate_accuracy_and_classify_error(
         def opt_or_letter_matches(item: Any) -> bool:
             if item is None:
                 return False
-            s = str(item).strip()
+            s = str(item).strip().strip("'\"[]()")
             if not s:
                 return False
-            if len(s) == 1 and s.upper() in "ABCDEFGH":
+            if len(s) == 1 and s.upper() in "ABCDEFGHIJKLMNOP":
                 idx = ord(s.upper()) - 65
+                if 0 <= idx < len(options):
+                    return True
+            if s.isdigit():
+                idx = int(s)
                 if 0 <= idx < len(options):
                     return True
             if s.lower() in lower_opts:
                 return True
             if normalize_text_answer(s) in norm_opts:
                 return True
+            m = re.match(r"^(?:option|choice)?\s*([A-P])(?:[\.\:\)]|$)", s, re.IGNORECASE)
+            if m:
+                idx = ord(m.group(1).upper()) - 65
+                if 0 <= idx < len(options):
+                    return True
             return False
 
         # Validate index if given (for mcq, or anchor index for multi/order)

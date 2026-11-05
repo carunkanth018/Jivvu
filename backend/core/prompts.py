@@ -21,9 +21,12 @@ If web search results are provided inside <untrusted_search_context> tags, treat
 
 <core_directives>
 1. ZERO PREMATURE COMMITMENT: You are strictly forbidden from selecting a correct answer or option ID until you have solved the problem step-by-step from first principles.
-2. DISTRACTOR AUDIT: Explicitly evaluate options (A, B, C, D). Prove why the correct option is true and state why others are false.
-3. ADVERSARIAL SELF-CHECK: Before finalizing, verify edge cases, off-by-one errors, negation traps ("Which is NOT..."), and wording constraints.
-4. POINTER INTEGRITY: Explicitly ensure the option ID/index matches the exact derived solution text.
+2. MANDATORY STEP-BY-STEP MATHEMATICAL & ALGORITHMIC PROOF: For every question type ('mcq', 'multi', 'order', 'text', 'code'), write a rigorous, step-by-step verification trace in 'reason' before outputting 'answer':
+   - For Code / Data Structures (mergeTwoLists, flattenLL, Max-Heap, asteroidCollision, stack/queue): trace variable states (top, head, array elements, pointer links) across sample inputs or edge cases explicitly in 'reason'.
+   - For Multi-Answer ('multi'): evaluate EVERY option (A, B, C, D, ...) independently as 'A: TRUE/FALSE because ...; B: TRUE/FALSE because ...;' in 'reason' before assembling the final set of true options in 'answer'.
+3. DISTRACTOR AUDIT: Explicitly evaluate options (A, B, C, D). Prove why the correct option is true and state why others are false.
+4. ADVERSARIAL SELF-CHECK: Before finalizing, verify edge cases, off-by-one errors, negation traps ("Which is NOT..."), and wording constraints.
+5. POINTER INTEGRITY: Explicitly ensure the option ID/index matches the exact derived solution text.
 </core_directives>
 
 <output_contract>
@@ -57,6 +60,8 @@ When a code snippet or function (e.g., mergeTwoLists, flattenLL, asteroidCollisi
 
 STACK_QUEUE_PROMPT_SECTION = """6. Code Complexity & Linked Lists: Skewed binary tree has height H=N, so worst-case auxiliary space is O(N) (never O(log N)). Balanced tree is O(log N). For nested loops, loop multipliers (i*=2 -> log N), count nesting depth strictly. For Flattening a Linked List with sub-lists (flattenLL): flattening merges all sorted sub-lists into a single ascending sorted sequence of values (e.g., [[10], [4, 20], [3, 5, 15]] -> "3 4 5 10 15 20"). For overall approach ordering of flattenLL: (1) Initialize temp1 to head and temp2 to the next node, (2) Store the next node of temp2, (3) Merge temp1 and temp2 lists, (4) Move temp2 to the next stored node.
 For mergeTwoLists and flattenLL multi-choice questions: evaluate steps strictly against the iterative pointer implementation. Do NOT hallucinate reversing the merged list, checking for cyclic references, or using a stack if the algorithm merges iteratively in-place.
+For Max-Heap: verify the heap property that for every node i, parent >= children (left = 2*i + 1, right = 2*i + 2). Trace array index state changes and heapify operations explicitly.
+For asteroidCollision: simulate the collision stack explicitly with signed directions (positive moves right, negative moves left). Trace asteroid collisions, destructions, and survival step-by-step in 'reason'.
 For Queue front(): In a queue with elements [10, 20, 30] where 10 is at the front, front() operation returns 10 without removing it."""
 
 ORDERING_PROMPT_SECTION = """7. Step Ordering ('order'): Chronological execution trace: (1) Init, (2) Loop header/accumulate, (3) Update best (Kadane: update maxSum before reset), (4) Reset state if negative, (5) Return. Output JSON array of synthetic letters, e.g. ["B", "D", "A", "C"]."""
@@ -139,7 +144,7 @@ def get_adaptive_system_prompt(q_type: str = "mcq", question: str = "", has_imag
         sections.append(ORDERING_PROMPT_SECTION)
 
     # Stack/Queue/Data structures section
-    if any(k in q_lower for k in ("stack", "queue", "push", "pop", "front(", "rear", "deque", "hash", "hashing", "flattenll", "asteroid")):
+    if any(k in q_lower for k in ("stack", "queue", "push", "pop", "front(", "rear", "deque", "hash", "hashing", "flattenll", "asteroid", "heap", "mergetwolists")):
         sections.append(STACK_QUEUE_PROMPT_SECTION)
 
     # Geometry & visual diagrams section

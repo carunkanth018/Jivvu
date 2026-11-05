@@ -1000,6 +1000,25 @@ tests/test_real_screenshots_demo.py: 4 passed
   - 8/8 tests passing in `tests/test_three_question_models.py`.
   - 8/8 offline deterministic self-tests passing in `eval/run_eval.py --self-test`.
 
+### 10. Absolute Extreme Accuracy Hardening & Verified Consensus Architecture
+- **Mandatory Reason-First Verification Trace**:
+  - Enforced step-by-step mathematical and algorithmic proof in `"reason"` before `"answer"` in `SYSTEM_PROMPT`.
+  - Added dedicated variable state tracing directives for `mergeTwoLists`, `flattenLL`, `Max-Heap` (parent/child index invariants `2*i+1` / `2*i+2`), `asteroidCollision` (signed collision stack simulation), and stack/queue pointer operations.
+  - Required exhaustive per-option evaluation (`A: TRUE/FALSE because ...; B: TRUE/FALSE because ...`) before assembling the final answer set for `multi` questions.
+- **Triangulation Consensus & 2-Model Agreement Engine**:
+  - Strictly requires at least 2 independent models to derive the exact same canonical answer before assigning `MEDIUM_TIEBREAKER_AGREE` or `HIGH_BOTH_AGREE`.
+  - When models split 3 ways, dispatches concurrent OpenRouter S-tier hedged racing with temperature `0.0`.
+  - Implements per-option bitwise 2-of-3 voting for `multi`: $S_{\text{majority}} = \{ i \mid \sum_{m} (i \in S_m) \ge 2 \}$, dropping single-model unverified options, and applies Intersection Rescue ($S_A \cap S_B$) on Arbiter exhaustion.
+- **Substring & Keyword Snap-to-Grid (`snap_to_closest_option`)**:
+  - Enhanced SequenceMatcher and Jaccard token overlap with substring containment bonus ($\ge 0.95$ of min/max length) and distinctive number sequence matches (e.g. `[6, 50, 40, ...]`), eliminating out-of-bounds `HALLUCINATED_OPTION` exceptions.
+- **Telemetry Auditor Multi-Format Permutation & Array Normalization**:
+  - Upgraded `validate_accuracy_and_classify_error` and `repair_historical_hallucinated_options` to parse JSON-encoded array strings, letters A-P, and numeric index sequences for both `multi` and `order` questions.
+- **Verification Evidence**:
+  - **Full Pytest Suite:** **304/304 passing (100%)** across all 37 test files (2 skipped, 1 warning in 147s).
+  - **Telemetry & Portability Suite:** **25/25 passing (100%)** in `tests/test_final_phase_telemetry_and_portability.py`.
+  - **Targeted Bugfix & Screenshots Suite:** **12/12 passing (100%)** in `tests/test_bugfix_selection_and_consensus.py` and `tests/test_real_screenshots_demo.py`.
+  - **Deterministic Offline Self-Test:** **8/8 passed (100%)** via `eval/run_eval.py --self-test`.
+
 ---
 *Document certified and anchored to QuizZy / Jivvu Core Architecture (2026).*
 

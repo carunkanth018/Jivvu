@@ -330,8 +330,21 @@ def snap_to_closest_option(candidate: str, options: List[str], min_similarity: f
         number_match = bool(cand_numbers and cand_numbers == opt_numbers)
 
         score = max(seq_ratio, overlap_ratio * 0.9, jaccard)
-        if number_match and overlap_ratio >= 0.5:
+
+        # Substring containment bonus (e.g. "Max-Heap" in "Max-Heap property")
+        if (cand_norm in opt_norm or opt_norm in cand_norm) and min(len(cand_norm), len(opt_norm)) >= 4:
+            sub_ratio = len(min(cand_norm, opt_norm, key=len)) / max(1, len(max(cand_norm, opt_norm, key=len)))
+            score = max(score, sub_ratio * 0.95)
+
+        if number_match and cand_numbers:
+            score = max(score, 0.90)
+        elif number_match and overlap_ratio >= 0.5:
             score = max(score, 0.85)
+
+        # Distinctive keyword overlap bonus (e.g. "asteroid", "collision", "flattenll")
+        has_distinctive = any(t in opt_tokens for t in cand_tokens if len(t) >= 6)
+        if has_distinctive and overlap_ratio >= 0.4:
+            score = max(score, 0.75)
 
         if score > best_score:
             second_best_score = best_score
@@ -341,7 +354,7 @@ def snap_to_closest_option(candidate: str, options: List[str], min_similarity: f
             second_best_score = score
 
     if best_idx is not None and best_score >= min_similarity:
-        if (best_score - second_best_score >= 0.04) or (best_score >= 0.65):
+        if (best_score - second_best_score >= 0.03) or (best_score >= 0.60):
             return best_idx
 
     return None

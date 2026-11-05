@@ -1291,14 +1291,15 @@ async def solve_question(
                                     norm_arb_key = arb_details.get("canonical_key")
                                     norm_a_key = norm_a.canonical_key if norm_a else None
                                     norm_b_key = norm_b.canonical_key if norm_b else None
-                                    if (norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key)) or norm_arb_key:
+                                    agrees_with_pri = bool(norm_arb_key and norm_arb_key in (norm_a_key, norm_b_key))
+                                    if agrees_with_pri or norm_arb_key:
                                         for p in pending_set:
                                             p.cancel()
                                         total_elapsed_ms = (time.perf_counter() - t0) * 1000.0
                                         arb_sol.latency_ms = total_elapsed_ms
                                         arb_sol.models_called = models_called
                                         arb_sol.agreement_details = agreement_details
-                                        arb_sol.confidence_tier = "MEDIUM_TIEBREAKER_AGREE"
+                                        arb_sol.confidence_tier = "MEDIUM_TIEBREAKER_AGREE" if agrees_with_pri else "LOW_FALLBACK"
                                         return arb_sol
                         except Exception:
                             pass

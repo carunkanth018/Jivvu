@@ -936,9 +936,9 @@ async def _solve_core(
                 selected_answer=getattr(response, "answer", None) if response else None,
                 selected_index=getattr(response, "selected_index", None) if response else None,
                 canonical_key=(
-                    getattr(response, "canonical_keys", None)[0]
+                    ", ".join(response.canonical_keys)
                     if (response and getattr(response, "canonical_keys", None))
-                    else (getattr(response, "answer", None) if response else None)
+                    else (getattr(response, "canonical_key", None) or (getattr(response, "answer", None) if response else None))
                 ),
                 status=status_val,
                 is_accurate=is_accurate,

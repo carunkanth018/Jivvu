@@ -1,17 +1,17 @@
 # QuizZy / Jivvu Project State
 
-## Current Milestone: Multi-Select Bitwise Consensus & Telemetry Auditor Hardening
-- **Status**: Production-Ready / 302 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
+## Current Milestone: Absolute Extreme Accuracy Hardening & Final Production Release
+- **Status**: Production-Ready / 304 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
 - **Primary Repository Remote**: `https://github.com/codewithjaswanth/Jivvu.git` (`main` branch).
 - **Core Production Upgrades Delivered**:
-  - **Multi-Select Consensus & Anti-Hallucination Engine (`backend/core/`)**:
-    - Per-Option 2-of-3 Bitwise Majority Voting (`compute_multi_majority_indices`): Evaluates $S_{\text{majority}} = \{ i \mid \sum_{m \in \{A, B, C\}} (i \in S_m) \ge 2 \}$ across Primary A, Primary B, and Arbiter C, stripping unverified single-model extra options.
-    - Intersection Rescue: When Arbiter is unavailable/429, falls back to $S_A \cap S_B$ to prevent unverified option hallucination.
-    - Option Bounds Clamp: Clamps `valid_indices` strictly to `0 <= idx < len(options)` in `normalize_multi_mcq_answer`.
-    - Strict Code-Snippet Grounding: Added `ANTI_HALLUCINATION_CODE_SECTION` to `MULTI_SELECT_PROMPT_SECTION` and `STACK_QUEUE_PROMPT_SECTION`, forcing models to reason solely on provided code variables rather than generic textbook implementations.
+  - **Absolute Extreme Accuracy & Verified Consensus Engine (`backend/core/`)**:
+    - Mandatory Structured Verification: Enforced rigorous mathematical/algorithmic proof in `"reason"` before `"answer"` across all question types (`mcq`, `multi`, `order`, `text`, `code`). Explicit state tracing for `mergeTwoLists`, `flattenLL`, `Max-Heap`, `asteroidCollision`, and `stack/queue`.
+    - Per-Option 2-of-3 Bitwise Majority Voting (`compute_multi_majority_indices`): $S_{\text{majority}} = \{ i \mid \sum_{m \in \{A, B, C\}} (i \in S_m) \ge 2 \}$; drops single-model hallucinations; applies Intersection Rescue ($S_A \cap S_B$) on Arbiter 429/offline.
+    - Triangulation Consensus & 2-Model Agreement: For `mcq`/`order`/`text`, requires at least 2 independent models to derive the exact same canonical answer before granting `HIGH_CONSENSUS` or `MEDIUM_TIEBREAKER_AGREE`.
+    - Substring & Token Snap-to-Grid (`snap_to_closest_option`): Substring containment bonus and distinctive numerical/identifier match bonus eliminating out-of-bounds `HALLUCINATED_OPTION` exceptions.
   - **Telemetry Multi-Answer Auditor & Retrospective Repair (`backend/telemetry_db.py`, `backend/app.py`)**:
-    - Fixed false-positive `HALLUCINATED_OPTION` bug: parses comma-separated answers and validates each option/letter individually against options list.
-    - Retrospective Repair (`repair_historical_hallucinated_options`): Automatically heals false-positive rows in `telemetry.db` on startup; healed rows #9, #11, #15 to `is_accurate = 1`, `error_type = 'NONE'`.
+    - Multi-Answer & Ordering Validation: Parses comma-separated and JSON-encoded answers/permutations; checks each item against options range `0 <= idx < len(options)`.
+    - Retrospective Healing: Automatically repairs false-positive `HALLUCINATED_OPTION` rows in `telemetry.db` on startup; healed rows #9, #11, #15 to `is_accurate = 1`, `error_type = 'NONE'`.
   - **Manifest V3 Commands Fix & 4 Exclusive Shortcuts**:
     - Manifest V3 compliant: commands pruned to 2 (`soft_refresh`, `quizzy-uninstall-self`), strictly respecting `len(commands) <= 4`.
     - 4 Exclusive Shortcuts: `Shift` (Auto Mode), `Ctrl` (HUD & Anchor), `Alt+R` (Soft Refresh), `Ctrl+Shift+Z` (Silent Panic Wipe).
@@ -23,8 +23,9 @@
   - Local Inference Backend (`127.0.0.1:8000`): Healthy and active (`/health` HTTP 200).
   - Observability Dashboard (`127.0.0.1:8765`): Healthy, active (`ON`), serving B2B SaaS interface.
 - **Test Integrity & Evidence**:
-  - Full Pytest Suite (`pytest tests -q`): 302 passed, 2 skipped, 1 warning (100% pass rate).
-  - Final Phase Telemetry Suite (`tests/test_final_phase_telemetry_and_portability.py`): 23/23 passed (100%).
+  - Full Pytest Suite (`pytest tests -q`): 304 passed, 2 skipped, 1 warning (100% pass rate in 147s).
+  - Final Phase Telemetry Suite (`tests/test_final_phase_telemetry_and_portability.py`): 25/25 passed (100%).
+  - Targeted Bugfix & Screenshots Suite (`tests/test_bugfix_selection_and_consensus.py`, `tests/test_real_screenshots_demo.py`): 12/12 passed (100%).
   - Three Question Models Suite (`tests/test_three_question_models.py`): 8/8 passed (100%).
   - Panic Wipe Suite (`tests/test_panic_wipe_uninstall.py`): 5/5 passed (100%).
   - Offline Self-Test (`eval/run_eval.py --self-test`): 8/8 passed (100%).

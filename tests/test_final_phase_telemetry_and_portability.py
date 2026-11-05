@@ -325,4 +325,88 @@ class TestMultiSelectConsensusAndTelemetryAuditor:
 
         assert row == (1, "NONE", "SUCCESS")
 
+    def test_snap_to_closest_option_substring_and_keyword_bonus(self):
+        from backend.core.normalizer import snap_to_closest_option
+
+        # Substring bonus: "Max-Heap" in "Max-Heap property"
+        idx = snap_to_closest_option("Max-Heap", ["Min-Heap property", "Max-Heap property", "Binary Tree"])
+        assert idx == 1
+
+        # Numerical sequence match
+        idx_num = snap_to_closest_option(
+            "[6, 50, 40, 45, 10, 60, 30]",
+            ["Array [1, 2, 3]", "Array [6, 50, 40, 45, 10, 60, 30]", "Array [10, 20]"]
+        )
+        assert idx_num == 1
+
+    def test_ordering_accuracy_logging_and_repair(self, tmp_path):
+        import json
+        import sqlite3
+        from types import SimpleNamespace
+        from backend.telemetry_db import validate_accuracy_and_classify_error, repair_historical_hallucinated_options
+
+        options = ["Init variables", "Process loop", "Accumulate sum", "Return result"]
+        order_resp = SimpleNamespace(
+            answer="A, B, C, D",
+            permutation_indices=[0, 1, 2, 3],
+            canonical_key="A, B, C, D",
+            status="ok",
+        )
+        is_acc, err, status = validate_accuracy_and_classify_error(
+            q_type="order",
+            options=options,
+            response=order_resp,
+        )
+        assert is_acc is True
+        assert err == "NONE"
+        assert status == "SUCCESS"
+
+        # Test repair on order question with JSON-encoded letters
+        test_db = tmp_path / "test_order_telemetry.db"
+        conn = sqlite3.connect(str(test_db))
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                q_type TEXT,
+                options_json TEXT,
+                canonical_key TEXT,
+                selected_answer TEXT,
+                is_accurate INTEGER,
+                error_type TEXT,
+                status TEXT,
+                error_message TEXT
+            )
+        """)
+        cur.execute(
+            """
+            INSERT INTO request_logs (
+                q_type, options_json, canonical_key, selected_answer, is_accurate, error_type, status, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "order",
+                json.dumps(options),
+                "A, B, C, D",
+                json.dumps(["A", "B", "C", "D"]),
+                0,
+                "HALLUCINATED_OPTION",
+                "FAILURE",
+                "False positive order hallucination",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        repaired = repair_historical_hallucinated_options(test_db)
+        assert repaired == 1
+
+        conn = sqlite3.connect(str(test_db))
+        cur = conn.cursor()
+        cur.execute("SELECT is_accurate, error_type, status FROM request_logs WHERE id = 1")
+        row = cur.fetchone()
+        conn.close()
+
+        assert row == (1, "NONE", "SUCCESS")
+
 
