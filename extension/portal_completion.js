@@ -1178,12 +1178,6 @@
         return;
       }
     }
-    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      if (typeof e.stopPropagation === "function") e.stopPropagation();
-      e.__quizzy_handled__ = true;
-      toggle();
-    }
   }
 
   const win = getGlobalWin();

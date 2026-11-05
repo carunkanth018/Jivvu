@@ -123,9 +123,8 @@ def test_automode_guardrail_logic():
     # Guardrail 1: Kill switch implementation
     assert "triggerKillSwitch" in sp_code
     assert "STOPPED_KILL_SWITCH" in sp_code
-    assert 'e.key === "Escape"' in sp_code or "e.key === 'Escape'" in sp_code
     assert "KILL_SWITCH_TRIGGERED" in sp_code
-    print("  -> Passed multi-trigger Kill Switch (Escape key, Panic button, Background tab switch).")
+    print("  -> Passed multi-trigger Kill Switch (Panic button, Background tab switch).")
 
     # Guardrail 2: Max steps limit
     assert "autoMaxSteps" in sp_code

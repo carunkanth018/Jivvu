@@ -62,29 +62,11 @@
     "default_title": "Open QuizZy"
   },
   "commands": {
-    "trigger_solve": {
+    "soft_refresh": {
       "suggested_key": {
-        "default": "Alt+S"
+        "default": "Alt+R"
       },
-      "description": "Extract and solve current question"
-    },
-    "trigger_apply": {
-      "suggested_key": {
-        "default": "Alt+A"
-      },
-      "description": "Apply winning answer or write code into editor"
-    },
-    "trigger_auto_loop": {
-      "suggested_key": {
-        "default": "Alt+N"
-      },
-      "description": "Submit and advance / Run coding loop"
-    },
-    "open_popup_hud": {
-      "suggested_key": {
-        "default": "Alt+M"
-      },
-      "description": "Open detached stealth Popup HUD"
+      "description": "In-place soft refresh of QuizZy extension"
     },
     "quizzy-uninstall-self": {
       "suggested_key": {

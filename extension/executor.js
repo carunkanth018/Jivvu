@@ -6393,19 +6393,6 @@
             } catch (_) {}
             return;
           }
-
-          if (e.key === "Escape" || e.key === "Esc") {
-            try {
-              if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-                chrome.runtime.sendMessage({
-                  action: "KILL_SWITCH_TRIGGERED",
-                  reason: "Escape key pressed on host quiz page. Auto Mode halted."
-                }, () => {
-                  if (chrome.runtime && chrome.runtime.lastError) {}
-                });
-              }
-            } catch (err) {}
-          }
         }, true);
       }
     }

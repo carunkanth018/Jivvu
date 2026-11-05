@@ -1503,63 +1503,34 @@ async function main() {
     throw new Error("Test 15: miniDotEl was not hidden after double-clicking #hud-mini-dot!");
   }
 
-  // 5. Test double-tap Z to toggle between Bar and Dot (in place of Alt)
+  // 5. Verify pruned shortcuts (double-tap Z and double-tap Alt) do NOT trigger minimize
   hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "z" });
   hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false, preventDefault: () => {} });
   hudSandbox.dispatchEvent({ type: "keyup", key: "z", preventDefault: () => {} });
 
-  if (test15HudInstance.isMinimized() !== true) {
-    throw new Error("Test 15: Double-tap Z did not minimize to white dot!");
+  if (test15HudInstance.isMinimized() === true) {
+    throw new Error("Test 15: Double-tap Z should be pruned and not trigger minimization!");
   }
 
-  // Double-tap Z again to restore
-  hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "z" });
-  hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false, preventDefault: () => {} });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "z", preventDefault: () => {} });
-
-  if (test15HudInstance.isMinimized() !== false) {
-    throw new Error("Test 15: Second double-tap Z did not restore the rectangular bar!");
-  }
-
-  // 5b. Also verify double-tap Alt toggles
+  // Double-tap Alt should also be pruned and not trigger minimize
   hudSandbox.dispatchEvent({ type: "keydown", key: "Alt", repeat: false });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Alt" });
   hudSandbox.dispatchEvent({ type: "keydown", key: "Alt", repeat: false, preventDefault: () => {} });
   hudSandbox.dispatchEvent({ type: "keyup", key: "Alt", preventDefault: () => {} });
 
+  if (test15HudInstance.isMinimized() === true) {
+    throw new Error("Test 15: Double-tap Alt should be pruned and not trigger minimization!");
+  }
+
+  // Programmatic setMinimized works without relying on legacy keyboard triggers
+  test15HudInstance.setMinimized(true);
   if (test15HudInstance.isMinimized() !== true) {
-    throw new Error("Test 15: Double-tap Alt did not minimize to white dot!");
+    throw new Error("Test 15: Programmatic setMinimized(true) failed!");
   }
-
-  // Double-tap Alt again to restore
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Alt", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Alt" });
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Alt", repeat: false, preventDefault: () => {} });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Alt", preventDefault: () => {} });
-
+  test15HudInstance.setMinimized(false);
   if (test15HudInstance.isMinimized() !== false) {
-    throw new Error("Test 15: Second double-tap Alt did not restore the rectangular bar!");
-  }
-
-  // 5c. Verify typing 'z' inside an input element does NOT trigger minimize
-  const testInputEl = new MockNode("input");
-  hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false, target: testInputEl });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "z", target: testInputEl });
-  hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false, target: testInputEl });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "z", target: testInputEl });
-  if (test15HudInstance.isMinimized() === true) {
-    throw new Error("Test 15: Double-tap Z inside input field triggered minimization!");
-  }
-
-  // 5d. Verify Ctrl+Z combo does NOT trigger minimize
-  hudSandbox.dispatchEvent({ type: "keydown", key: "Control", repeat: false });
-  hudSandbox.dispatchEvent({ type: "keydown", key: "z", repeat: false, ctrlKey: true });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "z", ctrlKey: true });
-  hudSandbox.dispatchEvent({ type: "keyup", key: "Control" });
-  if (test15HudInstance.isMinimized() === true) {
-    throw new Error("Test 15: Ctrl+Z combo triggered minimization!");
+    throw new Error("Test 15: Programmatic setMinimized(false) failed!");
   }
 
   // 6. Test single-press Ctrl to hide / unhide QuizZy

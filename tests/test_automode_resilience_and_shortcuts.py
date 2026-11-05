@@ -28,20 +28,23 @@ def test_background_shortcut_unified_command_router():
 
 
 def test_floating_hud_shortcuts_and_message_listener():
-    """Verify floating_hud.js contains comprehensive shortcut handlers and message actions."""
+    """Verify floating_hud.js strictly enforces the 4 exclusive keyboard shortcuts and message actions."""
     hud_code = (PROJECT_ROOT / "extension" / "floating_hud.js").read_text(encoding="utf-8")
 
-    # 1. Hotkey checks
-    assert 'key === "s" || code === "KeyS"' in hud_code
-    assert 'key === "a" || code === "KeyA"' in hud_code
-    assert 'key === "n" || code === "KeyN"' in hud_code
-    assert 'key === "m" || code === "KeyM"' in hud_code
-    assert 'key === "o" || code === "KeyO"' in hud_code
+    # 1. Exclusive keyboard shortcuts: Shift, Ctrl, Alt+R, Ctrl+Shift+Z
+    assert 'key === "Shift"' in hud_code or 'code === "ShiftLeft"' in hud_code
+    assert 'key === "Control"' in hud_code or 'code === "ControlLeft"' in hud_code
+    assert 'key === "r" || code === "KeyR"' in hud_code
+    assert 'e.key === "z" || e.key === "Z" || e.code === "KeyZ"' in hud_code
     assert "skipCurrentQuestion" not in hud_code
 
-    # 2. Modifier double-tap thresholds and keys
-    assert "diff >= 0 && diff <= 650" in hud_code
-    assert "handleModifierDoubleTap" in hud_code
+    # 2. Legacy shortcuts strictly pruned
+    assert 'key === "s" || code === "KeyS"' not in hud_code
+    assert 'key === "a" || code === "KeyA"' not in hud_code
+    assert 'key === "n" || code === "KeyN"' not in hud_code
+    assert 'key === "m" || code === "KeyM"' not in hud_code
+    assert 'key === "o" || code === "KeyO"' not in hud_code
+    assert 'modName === "Alt"' not in hud_code
 
     # 3. Message router actions
     assert 'message.action === "SHORTCUT_ACTION"' in hud_code

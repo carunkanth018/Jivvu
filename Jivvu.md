@@ -968,6 +968,18 @@ tests/test_real_screenshots_demo.py: 4 passed
 - **Verification Evidence**:
   - 5/5 dedicated unit & Node.js VM execution tests passing in `tests/test_panic_wipe_uninstall.py`.
 
+### 8. Manifest V3 Commands Limit Fix & 4 Exclusive Keyboard Shortcuts Architecture
+- **Root Cause**: Chrome Manifest V3 imposes a hard limit of at most 4 suggested shortcuts in the `manifest.json` `"commands"` dictionary (`Too many shortcuts specified for 'commands': The maximum is 4. Could not load manifest.`). Additionally, multiple overlapping shortcut listeners created risk of key collisions during proctored typing.
+- **Resolution**:
+  - Pruned `extension/manifest.json` `"commands"` down to exactly 2 valid commands (`soft_refresh` and `quizzy-uninstall-self`), strictly respecting `len(commands) <= 4`.
+  - Pruned all legacy shortcuts (`Alt+S`, `Alt+A`, `Alt+N`, `Alt+M`, `Alt+O`, `Escape`, `Ctrl+Alt+0`, double-tap `Z`, double-tap `Alt`) across all content scripts (`floating_hud.js`, `ccbp_lifecycle_bridge.js`, `sidepanel.js`, `executor.js`, `portal_completion.js`).
+  - Enforced strictly **four exclusive keyboard shortcuts** codebase-wide:
+    1. **`Shift`**: Start / Stop Auto-Solve Mode.
+    2. **`Ctrl`**: Toggle HUD Visibility & Reset Dot to Corner Anchor.
+    3. **`Alt + R`**: In-Place Extension Soft Refresh (< 60ms, No Webpage Reload).
+    4. **`Ctrl + Shift + Z`**: Silent Self-Uninstall & Complete DOM Wipe (`chrome.management.uninstallSelf({ showConfirmDialog: false })`).
+  - Underlying programmatic APIs (`solveCurrentQuestion`, `applyCurrentSolution`, `clickNextOnPage`, `QuizZyPortalCompletion`) remain fully intact for automation and diagnostics.
+
 ---
 *Document certified and anchored to QuizZy / Jivvu Core Architecture (2026).*
 

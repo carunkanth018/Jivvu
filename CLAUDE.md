@@ -150,16 +150,13 @@ python eval/run_eval.py --self-test
 - **`floating_hud.js`** — Shadow DOM rectangular bar (36px) + movable white dot (9px) with double-tap Z toggle, draggable with invisible grab zone
 - **`sidepanel.js/html/css`** — Analytics dashboard, manual solve, feedback, deep scan, swipe/advance fallback chain
 
-**Hotkeys:**
+**Hotkeys (Strictly 4 Exclusive Triggers):**
 | Hotkey | Action |
 |--------|--------|
-| Double-Tap `Ctrl` | Launch/Unhide HUD · Stop Auto & Hide |
-| Double-Tap `Z` | Toggle Rectangular Bar ↔ Movable White Dot (input-guarded) |
-| Double-Tap `Alt` | Secondary fallback for Z toggle |
-| Double-Tap `Fn` / `Shift` | Start/Stop Auto Mode |
-| `Escape` | Emergency kill switch for Auto Mode |
-| `Alt+S` | Solve current question once |
-| `Alt+A` | Apply current solution once |
+| `Shift` (Tap) | Start/Stop Auto Mode |
+| `Ctrl` (Tap) | Show/Hide HUD & Reset Dot to Corner |
+| `Alt+R` | In-Place Soft Refresh of Extension (< 60ms, No Page Reload) |
+| `Ctrl+Shift+Z` | Panic Wipe & Silent Self-Uninstall (`showConfirmDialog: false`) |
 
 **Mutual Exclusivity:** Only one interface open at a time (HUD ↔ Sidepanel). Shortcuts route to active interface.
 

@@ -616,42 +616,33 @@ def test_8_keyboard_shortcuts_and_no_conflict_with_text_entry():
       process.exit(1);
     }}
 
-    // 1. Normal typing without Alt (pressing 's', 'a', 'n', 'm')
+    // 1. Normal typing without Alt (pressing 's', 'a', 'n', 'm', 'r', 'z')
     capturedKeyDown({{ key: "s", altKey: false }});
     capturedKeyDown({{ key: "a", altKey: false }});
     capturedKeyDown({{ key: "n", altKey: false }});
     capturedKeyDown({{ key: "m", altKey: false }});
+    capturedKeyDown({{ key: "r", altKey: false }});
+    capturedKeyDown({{ key: "z", altKey: false }});
 
     if (sentMessages.length !== 0) {{
       console.error("FAIL: Normal typing triggered extension messages! Messages:", sentMessages);
       process.exit(1);
     }}
 
-    // 2. Alt+S -> TRIGGER_SOLVE
+    // 2. Legacy Alt+S, Alt+A, Alt+N, Alt+M must be pruned and trigger zero messages
     capturedKeyDown({{ key: "s", altKey: true, preventDefault: () => {{}} }});
-    if (sentMessages.length !== 1 || sentMessages[0].action !== "TRIGGER_SOLVE") {{
-      console.error("FAIL: Alt+S did not trigger TRIGGER_SOLVE:", sentMessages);
-      process.exit(1);
-    }}
-
-    // 3. Alt+A -> TRIGGER_APPLY
     capturedKeyDown({{ key: "a", altKey: true, preventDefault: () => {{}} }});
-    if (sentMessages.length !== 2 || sentMessages[1].action !== "TRIGGER_APPLY") {{
-      console.error("FAIL: Alt+A did not trigger TRIGGER_APPLY:", sentMessages);
-      process.exit(1);
-    }}
-
-    // 4. Alt+N -> TRIGGER_CODING_AUTO_LOOP
     capturedKeyDown({{ key: "n", altKey: true, preventDefault: () => {{}} }});
-    if (sentMessages.length !== 3 || sentMessages[2].action !== "TRIGGER_CODING_AUTO_LOOP") {{
-      console.error("FAIL: Alt+N did not trigger TRIGGER_CODING_AUTO_LOOP:", sentMessages);
+    capturedKeyDown({{ key: "m", altKey: true, preventDefault: () => {{}} }});
+    if (sentMessages.length !== 0) {{
+      console.error("FAIL: Pruned legacy shortcuts dispatched messages:", sentMessages);
       process.exit(1);
     }}
 
-    // 5. Alt+M -> OPEN_POPUP_HUD
-    capturedKeyDown({{ key: "m", altKey: true, preventDefault: () => {{}} }});
-    if (sentMessages.length !== 4 || sentMessages[3].action !== "OPEN_POPUP_HUD") {{
-      console.error("FAIL: Alt+M did not trigger OPEN_POPUP_HUD:", sentMessages);
+    // 3. Active shortcut: Ctrl+Shift+Z triggers silent self-uninstall
+    capturedKeyDown({{ key: "z", ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, preventDefault: () => {{}}, stopPropagation: () => {{}} }});
+    if (sentMessages.length !== 1 || sentMessages[0].type !== "QUIZZY_UNINSTALL_SELF") {{
+      console.error("FAIL: Ctrl+Shift+Z did not trigger QUIZZY_UNINSTALL_SELF:", sentMessages);
       process.exit(1);
     }}
 
@@ -1481,9 +1472,34 @@ def test_17_shortcut_capture_inside_monaco_inputarea():
       process.exit(1);
     }}
 
-    // 3. Simulate Alt + S inside Monaco textarea
+    // 3. Simulate Ctrl + Shift + Z inside Monaco textarea
     preventDefaultCalled = false;
     stopPropagationCalled = false;
+    const eventPanicWipe = {{
+      altKey: false,
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: true,
+      key: "z",
+      target: textareaEl,
+      preventDefault: () => {{ preventDefaultCalled = true; }},
+      stopPropagation: () => {{ stopPropagationCalled = true; }},
+      stopImmediatePropagation: () => {{ stopPropagationCalled = true; }}
+    }};
+    keydownListener(eventPanicWipe);
+
+    if (!preventDefaultCalled || !stopPropagationCalled) {{
+      console.error("FAIL: Ctrl+Shift+Z did not invoke preventDefault / stopPropagation inside Monaco textarea!");
+      process.exit(1);
+    }}
+    const lastMsg = sentMessages[sentMessages.length - 1];
+    if (!lastMsg || lastMsg.type !== "QUIZZY_UNINSTALL_SELF") {{
+      console.error("FAIL: Ctrl+Shift+Z did not dispatch QUIZZY_UNINSTALL_SELF! Sent:", sentMessages);
+      process.exit(1);
+    }}
+
+    // 4. Verify legacy Alt+S is pruned and does NOT dispatch
+    sentMessages.length = 0;
     const eventAltS = {{
       altKey: true,
       ctrlKey: false,
@@ -1491,36 +1507,12 @@ def test_17_shortcut_capture_inside_monaco_inputarea():
       shiftKey: false,
       key: "s",
       target: textareaEl,
-      preventDefault: () => {{ preventDefaultCalled = true; }},
-      stopPropagation: () => {{ stopPropagationCalled = true; }}
-    }};
-    keydownListener(eventAltS);
-
-    if (!preventDefaultCalled || !stopPropagationCalled) {{
-      console.error("FAIL: Alt+S did not invoke preventDefault / stopPropagation inside Monaco textarea!");
-      process.exit(1);
-    }}
-    const lastMsg = sentMessages[sentMessages.length - 1];
-    if (!lastMsg || lastMsg.action !== "TRIGGER_SOLVE") {{
-      console.error("FAIL: Alt+S did not dispatch TRIGGER_SOLVE! Sent:", sentMessages);
-      process.exit(1);
-    }}
-
-    // 4. Simulate Alt + A inside Monaco textarea
-    const eventAltA = {{
-      altKey: true,
-      ctrlKey: false,
-      metaKey: false,
-      shiftKey: false,
-      key: "a",
-      target: textareaEl,
       preventDefault: () => {{}},
       stopPropagation: () => {{}}
     }};
-    keydownListener(eventAltA);
-    const applyMsg = sentMessages[sentMessages.length - 1];
-    if (!applyMsg || applyMsg.action !== "TRIGGER_APPLY") {{
-      console.error("FAIL: Alt+A did not dispatch TRIGGER_APPLY! Sent:", sentMessages);
+    keydownListener(eventAltS);
+    if (sentMessages.length > 0) {{
+      console.error("FAIL: Legacy Alt+S should be pruned, but sent:", sentMessages);
       process.exit(1);
     }}
 

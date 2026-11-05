@@ -144,14 +144,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  window.addEventListener("keydown", (e) => {
-    if (e.altKey && (e.key === "m" || e.key === "M")) {
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      const isCode = btnModeCode && btnModeCode.classList.contains("active");
-      setSidepanelMode(isCode ? "mcq" : "code");
-    }
-  });
-
   // In-memory state
   let currentHost = "localhost";
   let activeTabUrl = "";
@@ -1160,13 +1152,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Global Escape Key Listener for Kill Switch
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" || e.key === "Esc") {
-      triggerKillSwitch("Escape key pressed");
-    }
-  });
-
   // Listen for background notifications (tab switched, navigated away, log trim)
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.action === "KILL_SWITCH_TRIGGERED") {
@@ -1915,41 +1900,10 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    if ((e.altKey && (key === "s" || code === "KeyS" || key === "x")) || (e.ctrlKey && e.shiftKey && (key === "x" || code === "KeyX"))) {
+    // Alt + R: In-Place Extension Soft Refresh
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && (key === "r" || code === "KeyR")) {
       e.preventDefault();
-      if (btnExtractSolve) btnExtractSolve.click();
-      return;
-    }
-
-    if (e.altKey && (key === "a" || code === "KeyA")) {
-      e.preventDefault();
-      if (btnApplyOnce) btnApplyOnce.click();
-      return;
-    }
-
-    if (e.altKey && (key === "n" || code === "KeyN")) {
-      e.preventDefault();
-      safeSendMessage({ action: "CLICK_NEXT_BUTTON" });
-      return;
-    }
-
-    if (e.altKey && (key === "k" || code === "KeyK" || key === "w" || code === "KeyW")) {
-      e.preventDefault();
-      if (btnSwipeAdvance) {
-        btnSwipeAdvance.click();
-      } else {
-        safeSendMessage({ action: "SWIPE_OR_ADVANCE" });
-      }
-      return;
-    }
-
-    if (e.altKey && (key === "o" || code === "KeyO" || (e.shiftKey && (key === "a" || code === "KeyA")))) {
-      e.preventDefault();
-      if (isAutoRunning) {
-        triggerKillSwitch("Stopped via shortcut");
-      } else {
-        if (btnStartAuto) btnStartAuto.click();
-      }
+      safeSendMessage({ action: "QUIZZY_SOFT_REFRESH_EXTENSION", type: "QUIZZY_SOFT_REFRESH_EXTENSION" });
       return;
     }
   });

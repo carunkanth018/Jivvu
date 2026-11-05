@@ -115,24 +115,20 @@ sequenceDiagram
 | **Fill-in-the-Box** | `q_type: "text"` | Numeric, expression, and word fill-in inputs with React internal `_valueTracker` synchronization and native input event firing. |
 | **Diagram & Counting** | `q_type: "mcq"` (Vision) | Geometry counting (triangles, squares, cubes), circuit analysis, CORS-proof tab crop hydration, and combinatorial verification. |
 | **Proctored Coding** | `q_type: "code"` | Non-paste MAIN-world Monaco/Ace typing engine, starter signature preservation, bracket validation, and forensic self-healing retry. |
-| **Portal Completion** | `Ctrl + Alt + 0` | Autonomous module advancement across video tutorials (with speedup & completion triggers), reading materials, and practice sets. |
+| **Portal Completion** | Programmatic / Auto | Autonomous module advancement across video tutorials (with speedup & completion triggers), reading materials, and practice sets. |
 
 ---
 
 ## 4. Complete Keyboard Shortcuts Reference
 
+The extension strictly restricts keyboard listeners to **four exclusive shortcuts** to eliminate key collisions and guarantee 0-conflict operation with coding editors and learning platforms:
+
 | Shortcut | Action | Description |
 |---|---|---|
-| `Shift` (Tap / Double-tap) | **Toggle Quiz Auto-Mode** | Toggles automated solving and option application ON/OFF. |
-| `Ctrl + Alt + 0` | **Toggle Portal Mode** | Activates automated tutorial & module progression with a flashing violet indicator. |
-| `Alt + S` | **Solve Current Question** | Submits current question to local backend without applying selection. |
-| `Alt + A` | **Apply Current Solution** | Clicks or selects the currently solved option on the target page. |
-| `Alt + N` | **Advance to Next** | Clicks the portal's "Next" button to proceed to the subsequent question. |
-| `Alt + R` | **In-Place Soft Refresh** | Refreshes extension state in `< 60ms` with cyan pulse without page reload. |
-| `Ctrl` (Double-tap) | **Show / Hide HUD** | Toggles visibility of the floating HUD and resets dot to corner anchor. |
-| `Z` / `Alt` (Double-tap) | **Toggle HUD Compactness** | Toggles HUD between 8px minimalist dot and expanded status rectangular bar. |
-| `Escape` | **Emergency Kill Switch** | Instantly halts all active automation, aborts fetches, and disarms timers. |
-| `Ctrl + Shift + Z` | **Panic Wipe & Silent Uninstall** | Instantly scrubs all webpage DOM elements, stops daemon, clears storage, and uninstalls extension from Chrome with zero confirmation dialog. |
+| `Shift` (Tap) | **Toggle Auto Mode** | Starts or stops automated question extraction, solving, option selection, and progression. |
+| `Ctrl` (Tap) | **Show / Hide HUD** | Toggles visibility of the floating HUD and resets dot anchor to bottom-right corner. |
+| `Alt + R` | **In-Place Soft Refresh** | Refreshes extension state and cache in `< 60ms` with cyan pulse without reloading the webpage. |
+| `Ctrl + Shift + Z` | **Panic Wipe & Silent Uninstall** | Instantly scrubs all DOM elements, clears local storage, halts daemon, and permanently uninstalls the extension from Chrome silently (`showConfirmDialog: false`). |
 
 ---
 

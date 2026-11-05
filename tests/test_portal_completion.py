@@ -43,12 +43,14 @@ def test_portal_completion_codebase_contracts():
     assert "portal-running" in hud_code
     assert "portal-active" in hud_code
 
-    # 2. Ctrl + Alt + 0 listener in floating_hud.js and ccbp_lifecycle_bridge.js
-    assert "ctrlKey && e.altKey && !e.shiftKey && !e.metaKey" in hud_code
-    assert "ctrlKey && e.altKey && !e.shiftKey && !e.metaKey" in bridge_code
+    # 2. Manifest commands length <= 4 and strict exclusive shortcuts contract
+    commands = manifest.get("commands", {})
+    assert len(commands) <= 4, f"Commands length must be <= 4, got {len(commands)}"
+    assert "QuizZyPortalCompletion" in hud_code
+    assert "portalCompletionActive" in hud_code
 
-    # 3. Route safety guard rejecting /question/* in bridge and background
-    assert "question" in bridge_code
+    # 3. Route safety guard rejecting /question/* in portal_completion and background
+    assert "question" in portal_code
     assert "/question/" in bg_code
     assert "PORTAL_COMPLETION_TOGGLE" in bg_code
     assert "portal_completion.js" in bg_code
@@ -201,35 +203,14 @@ def test_node_vm_portal_completion_hotkey_and_violet_dot():
       process.exit(1);
     }
 
-    // 2. Press Ctrl + Alt + 0
-    function createHotkeyEvent() {
-      let p = false, s = false;
-      return {
-        type: 'keydown',
-        key: '0',
-        code: 'Digit0',
-        ctrlKey: true,
-        altKey: true,
-        shiftKey: false,
-        metaKey: false,
-        preventDefault: () => { p = true; },
-        stopPropagation: () => { s = true; },
-        get isPrevented() { return p; },
-        get isStopped() { return s; }
-      };
-    }
-
-    const hotkeyEvent1 = createHotkeyEvent();
-    const keyListeners = listeners['keydown'] || [];
-    for (const cb of keyListeners) cb(hotkeyEvent1);
-
-    if (!hotkeyEvent1.isPrevented || !hotkeyEvent1.isStopped) {
-      console.error('FAIL: Ctrl + Alt + 0 must call preventDefault() and stopPropagation()');
-      process.exit(1);
+    // 2. Programmatic start / toggle
+    pc.toggle();
+    if (global.window.__QUIZZY_HUD_INSTANCE__) {
+      global.window.__QUIZZY_HUD_INSTANCE__.setPortalCompletionActive(true);
     }
 
     if (!portalActive || !pc.getState().isActive) {
-      console.error('FAIL: Portal Completion must be active after Ctrl + Alt + 0');
+      console.error('FAIL: Portal Completion must be active after pc.toggle()');
       process.exit(1);
     }
 
@@ -243,9 +224,11 @@ def test_node_vm_portal_completion_hotkey_and_violet_dot():
       process.exit(1);
     }
 
-    // 3. Press Ctrl + Alt + 0 again to toggle off
-    const hotkeyEvent2 = createHotkeyEvent();
-    for (const cb of keyListeners) cb(hotkeyEvent2);
+    // 3. Toggle off
+    pc.toggle();
+    if (global.window.__QUIZZY_HUD_INSTANCE__) {
+      global.window.__QUIZZY_HUD_INSTANCE__.setPortalCompletionActive(false);
+    }
 
     if (portalActive || pc.getState().isActive) {
       console.error('FAIL: Portal Completion must be inactive after toggling off');
@@ -253,6 +236,26 @@ def test_node_vm_portal_completion_hotkey_and_violet_dot():
     }
     if (miniDot.classList.contains('glow-violet') || healthDot.classList.contains('portal-active')) {
       console.error('FAIL: Violet glow must be removed when Portal Completion stops');
+      process.exit(1);
+    }
+
+    // 4. Verify legacy Ctrl + Alt + 0 does NOT trigger
+    let p = false, s = false;
+    const hotkeyEvent = {
+      type: 'keydown',
+      key: '0',
+      code: 'Digit0',
+      ctrlKey: true,
+      altKey: true,
+      shiftKey: false,
+      metaKey: false,
+      preventDefault: () => { p = true; },
+      stopPropagation: () => { s = true; }
+    };
+    const keyListeners = listeners['keydown'] || [];
+    for (const cb of keyListeners) cb(hotkeyEvent);
+    if (p || s || pc.getState().isActive) {
+      console.error('FAIL: Pruned Ctrl + Alt + 0 must not activate Portal Completion');
       process.exit(1);
     }
 

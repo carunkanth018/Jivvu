@@ -226,16 +226,7 @@ def test_node_vm_exclusive_shortcuts_execution():
       process.exit(1);
     }}
 
-    // 3. Shortcuts pressed on web page while side panel is open -> forward to side panel!
-    sentMessages = [];
-    windowListeners['keydown']({{ altKey: true, key: 's', code: 'KeyS' }});
-    const forwardedSolve = sentMessages.find(m => m.action === 'FORWARD_SHORTCUT_TO_SIDEPANEL' && m.command === 'trigger_solve');
-    if (!forwardedSolve) {{
-      console.error('FAIL: Alt+S did not forward to side panel when side panel is open');
-      process.exit(1);
-    }}
-
-    // 3b. Shift key pressed while side panel is open -> forward auto mode to side panel!
+    // 3. Shift key pressed while side panel is open -> forward auto mode to side panel!
     sentMessages = [];
     windowListeners['keydown']({{ key: 'Shift', code: 'ShiftLeft' }});
     windowListeners['keyup']({{ key: 'Shift', code: 'ShiftLeft' }});

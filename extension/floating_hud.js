@@ -959,17 +959,6 @@
         return;
       }
 
-      const hud = getActiveCodingHudInstance();
-      if (e.key === "Escape" || e.key === "Esc") {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "KILL_SWITCH_TRIGGERED", reason: "Escape hotkey" }, () => { if (chrome.runtime.lastError) {} });
-        }
-        if (hud && hud.isAutoRunning) {
-          hud.stopAuto();
-        }
-        return;
-      }
-
       if (e.repeat) return;
 
       const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
@@ -1012,40 +1001,6 @@
           }
           return;
         }
-      }
-
-      // Specifically allow Alt+S, Alt+A, Alt+N, Alt+M even when focused inside Monaco's <textarea class="inputarea">
-      if (key === "s" || code === "KeyS") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_SOLVE" }, () => { if (chrome.runtime.lastError) {} });
-        }
-        return;
-      }
-      if (key === "a" || code === "KeyA") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_APPLY" }, () => { if (chrome.runtime.lastError) {} });
-        }
-        return;
-      }
-      if (key === "n" || code === "KeyN") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "TRIGGER_CODING_AUTO_LOOP" }, () => { if (chrome.runtime.lastError) {} });
-        }
-        return;
-      }
-      if (key === "m" || code === "KeyM") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ action: "OPEN_POPUP_HUD", force: true }, () => { if (chrome.runtime.lastError) {} });
-        }
-        return;
       }
     };
 
@@ -3604,21 +3559,12 @@
   // ==========================================================================
   let ctrlDown = false;
   let ctrlComboUsed = false;
-  let altDown = false;
-  let altComboUsed = false;
   let shiftDown = false;
   let shiftComboUsed = false;
-  let fnDown = false;
-  let fnComboUsed = false;
-  let zDown = false;
-  let zComboUsed = false;
 
   const lastTapTimes = {
     Control: 0,
-    Alt: 0,
-    Shift: 0,
-    Fn: 0,
-    Z: 0
+    Shift: 0
   };
 
   function isEditableElement(el) {
@@ -3630,16 +3576,9 @@
     return false;
   }
 
-  function isFnKey(e) {
-    return e.key === "Fn" || e.key === "Function" || e.code === "Fn" || e.key === "Unidentified" || e.keyCode === 255;
-  }
-
   const singleTapTimers = {
     Control: null,
-    Shift: null,
-    Fn: null,
-    Z: null,
-    Alt: null
+    Shift: null
   };
 
   let lastGlobalHandledEvent = null;
@@ -3664,7 +3603,7 @@
             codingHud.hide();
           }
         }
-      } else if (modName === "Shift" || modName === "Fn") {
+      } else if (modName === "Shift") {
         mountCodingDotHud(codingHud);
         if (codingHud) {
           if (codingHud.isAutoRunning) {
@@ -3695,23 +3634,7 @@
         resetDotPositionToCorner(wrapper);
         toggleVisibility();
       }
-    } else if (modName === "Alt") {
-      if (e && typeof e.preventDefault === "function") e.preventDefault();
-      if (isSidePanelOpen) {
-        sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_mode" });
-      } else {
-        if (isHiddenState) setHidden(false);
-        setMinimized(!isMinimizedState);
-      }
-    } else if (modName === "Z") {
-      if (isDouble) {
-        if (e && typeof e.preventDefault === "function") e.preventDefault();
-        if (!isSidePanelOpen) {
-          if (isHiddenState) setHidden(false);
-          setMinimized(!isMinimizedState);
-        }
-      }
-    } else if (modName === "Fn" || modName === "Shift") {
+    } else if (modName === "Shift") {
       if (e) {
         lastGlobalHandledEvent = e;
         e.__quizzy_handled__ = true;
@@ -3734,31 +3657,6 @@
   function handleModifierDoubleTap(modName, e) {
     if (modName === "Control" || modName === "Shift") {
       executeModifierAction(modName, false, e);
-      return;
-    }
-    const now = Date.now();
-    const last = lastTapTimes[modName] || 0;
-    const diff = now - last;
-
-    if (last > 0 && diff >= 0 && diff <= 650) {
-      lastTapTimes[modName] = 0;
-      if (singleTapTimers[modName]) {
-        clearTimeout(singleTapTimers[modName]);
-        singleTapTimers[modName] = null;
-      }
-      executeModifierAction(modName, true, e);
-    } else {
-      lastTapTimes[modName] = now;
-      if (singleTapTimers[modName]) {
-        clearTimeout(singleTapTimers[modName]);
-      }
-      if (modName === "Control" || modName === "Shift" || modName === "Fn") {
-        singleTapTimers[modName] = setTimeout(() => {
-          singleTapTimers[modName] = null;
-          lastTapTimes[modName] = 0;
-          executeModifierAction(modName, false, e);
-        }, 260);
-      }
     }
   }
 
@@ -3780,31 +3678,8 @@
       return;
     }
 
-    if (e.key === "Escape" || e.key === "Esc") {
-      ctrlComboUsed = true;
-      shiftComboUsed = true;
-      altComboUsed = true;
-      if (isSidePanelOpen) {
-        sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "escape" });
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        return;
-      }
-      if (isAutoRunning) {
-        stopAutoMode("Escape key pressed.");
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        return;
-      }
-    }
-
-    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      if (typeof e.stopPropagation === "function") e.stopPropagation();
-      e.__quizzy_handled__ = true;
-      togglePortalCompletion();
-      return;
-    }
-
-    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+    // Alt + R: In-Place Extension Soft Refresh
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
       const key = (e.key || "").toLowerCase();
       const code = e.code || "";
       if (key === "r" || code === "KeyR") {
@@ -3817,76 +3692,12 @@
           return;
         }
       }
-      if (key === "s" || code === "KeyS") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_solve" });
-        } else {
-          solveCurrentQuestion();
-        }
-        return;
-      }
-      if (key === "a" || code === "KeyA") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_apply" });
-        } else {
-          applyCurrentSolution();
-        }
-        return;
-      }
-      if (key === "n" || code === "KeyN") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_next" });
-        } else {
-          clickNextOnPage((res) => {
-            if (res && res.button_text && answerText) {
-              answerText.textContent = `Advanced: ${res.button_text}`;
-            }
-          });
-        }
-        return;
-      }
-      if (key === "m" || code === "KeyM") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_mode" });
-        } else {
-          if (e.shiftKey) {
-            toggleMode();
-          } else {
-            toggleVisibility();
-          }
-        }
-        return;
-      }
-      if (key === "o" || code === "KeyO") {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        if (isSidePanelOpen) {
-          sendExtensionMessage({ action: "FORWARD_SHORTCUT_TO_SIDEPANEL", command: "trigger_auto" });
-        } else {
-          if (isAutoRunning) {
-            stopAutoMode("Stopped via Alt+O");
-          } else {
-            startAutoMode();
-          }
-        }
-        return;
-      }
     }
 
     if (e.repeat) return;
 
     const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
-    const isAlt = e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
     const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
-    const isZ = e.key === "z" || e.key === "Z" || e.code === "KeyZ";
 
     if (isControl) {
       if (ctrlDown) return;
@@ -3910,53 +3721,17 @@
     } else {
       if (shiftDown) shiftComboUsed = true;
     }
-
-    if (isAlt) {
-      altDown = true;
-      altComboUsed = false;
-    } else {
-      if (altDown) altComboUsed = true;
-    }
-
-    if (isFnKey(e)) {
-      fnDown = true;
-      fnComboUsed = false;
-      handleModifierDoubleTap("Fn", e);
-      return;
-    } else {
-      if (fnDown) fnComboUsed = true;
-    }
-
-    if (isZ) {
-      const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
-      if (!isEditableElement(e.target) && !isEditableElement(activeEl) && !e.ctrlKey && !e.altKey && !e.metaKey && !ctrlDown && !altDown) {
-        zDown = true;
-        zComboUsed = false;
-      } else {
-        zDown = false;
-        zComboUsed = true;
-      }
-    } else {
-      if (zDown) zComboUsed = true;
-    }
   }
 
   function onGlobalKeyUp(e) {
     if (!e || e === lastGlobalHandledEvent || e.__quizzy_handled__) return;
     const isControl = e.key === "Control" || e.code === "ControlLeft" || e.code === "ControlRight" || e.keyCode === 17 || e.which === 17;
-    const isAlt = e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
     const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16 || e.which === 16;
-    const isZ = e.key === "z" || e.key === "Z" || e.code === "KeyZ";
 
     if (isControl) {
       ctrlDown = false;
       if (!ctrlComboUsed) {
         executeModifierAction("Control", false, e);
-      }
-    } else if (isAlt) {
-      altDown = false;
-      if (!altComboUsed) {
-        handleModifierDoubleTap("Alt", e);
       }
     } else if (isShift) {
       const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
@@ -3972,17 +3747,6 @@
       if (wasDown && !wasCombo) {
         executeModifierAction("Shift", false, e);
       }
-    } else if (isFnKey(e)) {
-      fnDown = false;
-      if (!fnComboUsed) {
-        handleModifierDoubleTap("Fn", e);
-      }
-    } else if (isZ) {
-      if (zDown && !zComboUsed) {
-        handleModifierDoubleTap("Z", e);
-      }
-      zDown = false;
-      zComboUsed = false;
     }
   }
 
@@ -4009,12 +3773,6 @@
     ctrlComboUsed = false;
     shiftDown = false;
     shiftComboUsed = false;
-    altDown = false;
-    altComboUsed = false;
-    fnDown = false;
-    fnComboUsed = false;
-    zDown = false;
-    zComboUsed = false;
   }
 
   if (typeof window !== "undefined" && !window.__QUIZZY_GLOBAL_KEYBOARD_INITIALIZED__) {

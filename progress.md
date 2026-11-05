@@ -892,6 +892,26 @@ Implemented and strictly verified across live `learning.ccbp.in` question models
   - **Deterministic Offline Self-Test:** **100% passing** (Tests 0–7) via `eval/run_eval.py --self-test`.
   - **Live Daemons & Dashboard:** Port 8000 gracefully cycled via `lifecycle_manager.py` with 6-key pool active in RAM; Port 8765 Observability Dashboard online (`ON`) and pinging in 452ms.
 
+### 10.27 Manifest V3 Commands Limit Resolution & 4 Exclusive Keyboard Shortcuts Architecture
+- **Technical Enhancements Delivered**:
+  1. **Manifest Commands Limit Compliance (`extension/manifest.json`)**:
+     - Resolved Chrome extension load failure: `Too many shortcuts specified for 'commands': The maximum is 4. Could not load manifest.`
+     - Pruned legacy command registrations (`trigger_solve`, `trigger_apply`, `trigger_auto_loop`, `open_popup_hud`), leaving exactly 2 valid commands (`soft_refresh` and `quizzy-uninstall-self`), strictly $\le 4$.
+  2. **Codebase-Wide Keyboard Shortcut Pruning & 4 Exclusive Shortcuts (`extension/`)**:
+     - Pruned all extraneous keyboard shortcut listeners (`Alt+S`, `Alt+A`, `Alt+N`, `Alt+M`, `Alt+O`, `Escape`, `Ctrl+Alt+0`, double-tap `Z`, double-tap `Alt`) across `floating_hud.js`, `ccbp_lifecycle_bridge.js`, `sidepanel.js`, `executor.js`, and `portal_completion.js`.
+     - Strictly enforced the 4 exclusive keyboard shortcuts:
+       - **`Shift`**: Toggle Auto-Solve Mode ON/OFF.
+       - **`Ctrl`**: Show/Hide HUD & Reset Dot Anchor to Bottom-Right Corner.
+       - **`Alt + R`**: In-Place Extension Soft Refresh (< 60ms, No Webpage Reload).
+       - **`Ctrl + Shift + Z`**: Silent Panic Wipe & Self-Uninstall (`chrome.management.uninstallSelf({ showConfirmDialog: false })`).
+     - Preserved programmatic APIs (`solveCurrentQuestion`, `applyCurrentSolution`, `clickNextOnPage`, `QuizZyPortalCompletion`) for seamless UI and automation operation.
+  3. **Updated Test Suite Parity (`tests/`)**:
+     - Updated `test_white_blue_theme_and_exclusive_shortcuts.py`, `test_phase3_automode.py`, `test_phase7_coding_automation_engine.py`, `test_portal_completion.py`, `test_automode_resilience_and_shortcuts.py`, and `test_live_site_compatibility.py` to assert the 4 exclusive shortcuts and verify that pruned legacy shortcuts are cleanly ignored.
+- **Verification Evidence**:
+  - **Manifest V3 Commands Count:** `python -c "import json; m = json.load(open('extension/manifest.json')); assert len(m.get('commands', {})) <= 4"`: Verified 2 commands.
+  - **Full Pytest Suite:** All tests passing (100% pass rate).
+  - **Deterministic Offline Self-Test:** 8/8 passed (100%) via `eval/run_eval.py --self-test`.
+
 ---
 
 > *This document represents the complete, verified state of the QuizZy / Jivvu project as of November 2026. All components have been verified via automated tests and runtime audits.*

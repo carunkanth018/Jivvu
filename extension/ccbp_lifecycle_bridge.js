@@ -186,33 +186,6 @@
         }
       }
 
-      // Ctrl + Alt + 0: Portal Completion Toggle
-      if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
-        if (typeof e.preventDefault === "function") e.preventDefault();
-        if (typeof e.stopPropagation === "function") e.stopPropagation();
-        e.__quizzy_handled__ = true;
-
-        // Route safety guard: do not start if on standalone question or quiz runner
-        const pathname = (typeof window !== "undefined" && window.location) ? (window.location.pathname || "") : "";
-        if (/\/question\/[a-z0-9-]+/i.test(pathname) || /\/assessment\/|\/test-runner\//i.test(pathname)) {
-          return;
-        }
-
-        if (typeof window !== "undefined" && window.QuizZyPortalCompletion && typeof window.QuizZyPortalCompletion.toggle === "function") {
-          window.QuizZyPortalCompletion.toggle();
-          return;
-        }
-
-        try {
-          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-            chrome.runtime.sendMessage({ action: "PORTAL_COMPLETION_TOGGLE" }, () => {
-              if (chrome.runtime && chrome.runtime.lastError) { }
-            });
-          }
-        } catch (_) { }
-        return;
-      }
-
       const isShift = e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight" || e.keyCode === 16;
       if (isShift) {
         const activeEl = (typeof document !== "undefined") ? document.activeElement : null;

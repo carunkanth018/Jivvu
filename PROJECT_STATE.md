@@ -1,24 +1,28 @@
 # QuizZy / Jivvu Project State
 
-## Current Milestone: Final Production Release, Zero-Error Telemetry & Panic Wipe
-- **Status**: Production-Ready / 298 Pytest Tests Passing (100% Pass Rate) / Zero Telemetry Errors.
+## Current Milestone: Final Production Release, 4 Exclusive Shortcuts & Panic Wipe
+- **Status**: Production-Ready / 298 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
 - **Primary Repository Remote**: `https://github.com/codewithjaswanth/Jivvu.git` (`main` branch).
 - **Core Production Upgrades Delivered**:
+  - **Manifest V3 Commands Fix & 4 Exclusive Shortcuts**:
+    - Fixed Chrome load error: pruned `manifest.json` commands to 2 (`soft_refresh` and `quizzy-uninstall-self`), strictly respecting `len(commands) <= 4`.
+    - Enforced 4 exclusive shortcuts codebase-wide: `Shift` (Auto Mode), `Ctrl` (Show/Hide HUD & Reset Dot), `Alt+R` (Soft Refresh), `Ctrl+Shift+Z` (Silent Panic Wipe).
+    - Pruned all legacy shortcuts (`Alt+S`, `Alt+A`, `Alt+N`, `Alt+M`, `Escape`, `Ctrl+Alt+0`, double-tap `Z`, double-tap `Alt`).
   - **Zero-Error Telemetry Pipeline (`backend/`)**: Eliminated all 5 failure modes:
-    - `VALIDATION_ERROR`: `SolveRequest` `@model_validator` pre-sanitizer for null options, case-insensitive `q_type`, non-string option coercion, and diagram/code fallback stem.
+    - `VALIDATION_ERROR`: `SolveRequest` `@model_validator` pre-sanitizer for null options, case-insensitive `q_type`, non-string option coercion, diagram/code fallback stem.
     - `SCHEMA_PARSE_ERROR`: 5-stage defensive parser recovery (strip fences/tags, fast JSON, auto-repair unescaped newlines/truncated brackets, AST literal pass, regex field rescue).
-    - `HALLUCINATED_OPTION`: `snap_to_closest_option` SequenceMatcher & token-overlap fallback snapping to valid options; strict bounds post-checks in `backend/app.py`.
+    - `HALLUCINATED_OPTION`: `snap_to_closest_option` SequenceMatcher & token-overlap fallback snapping to valid options; strict bounds post-checks.
     - `LLM_TIMEOUT` & Speed: Persistent `httpx.AsyncClient` keep-alive pool saving 150-300ms TCP handshakes; immediate task cancellation on agreement.
     - `RATE_LIMIT_429`: Proactive sliding-window header tracking; instant `< 5ms` model bucket rotation.
   - **Silent Self-Uninstall ("Panic Wipe" on `Ctrl + Shift + Z`)**:
-    - Manifest V3 zero-intrusive self-removal via `chrome.management.uninstallSelf({ showConfirmDialog: false })` (zero `"management"` permission requirement).
-    - Multi-context capture in `floating_hud.js`, `ccbp_lifecycle_bridge.js`, `sidepanel.js`, `executor.js`, and `manifest.json` commands.
-    - Deterministic 4-stage scrub: live DOM & listener wipe (`window.__QUIZZY_SELF_DESTRUCT_DOM__`), multi-tab broadcast (120ms max), best-effort daemon stop (`:8000/shutdown` & `STOP_BACKEND`), and `chrome.storage.local.clear()`.
+    - Manifest V3 zero-intrusive self-removal via `chrome.management.uninstallSelf({ showConfirmDialog: false })`.
+    - Multi-context capture in `floating_hud.js`, `ccbp_lifecycle_bridge.js`, `sidepanel.js`, `executor.js`, and `manifest.json`.
+    - Deterministic 4-stage scrub: live DOM & listener wipe (`window.__QUIZZY_SELF_DESTRUCT_DOM__`), multi-tab broadcast, daemon stop (`:8000/shutdown`), and storage wipe.
   - **Multi-Laptop Portability (`setup.bat`, `setup.ps1`, `backend/native_host.py`)**:
-    - Purged hardcoded paths; dynamic repository-root and parent resolution.
-    - `backend/native_host.py --register` auto-compiles `native_host_win.cs` via built-in Windows `.NET` `csc.exe` if missing.
+    - Purged hardcoded paths; dynamic repository-root resolution.
+    - Auto-compiles `native_host_win.cs` via built-in Windows `.NET` `csc.exe` if missing.
     - Single-command setup with Recommended (`--recommended`, default) and Quick (`--quick`, `< 10s`) modes.
-  - **Executive-Grade Documentation**: Full rewrite of `README.md` with architectural pillars, ASCII/Mermaid flow diagrams, shortcuts table, and setup guides.
+  - **Executive-Grade Documentation**: Full rewrite of `README.md` with architectural pillars, ASCII flow diagrams, 4 exclusive shortcuts table, and setup guides.
 - **Active Daemons & Interfaces**:
   - Local Inference Backend (`127.0.0.1:8000`): Healthy and active (`/health` HTTP 200).
   - Observability Dashboard (`127.0.0.1:8765`): Healthy, active (`ON`), serving B2B SaaS interface.
