@@ -1,11 +1,15 @@
 # QuizZy / Jivvu Project State
 
-## Current Milestone: Absolute Extreme Accuracy Hardening & Final Production Release
+## Current Milestone: System Harmonization & Golden-Mean Production Balance
 - **Status**: Production-Ready / 304 Pytest Tests Passing (100% Pass Rate) / Zero Extension Load Errors.
 - **Primary Repository Remote**: `https://github.com/codewithjaswanth/Jivvu.git` (`main` branch).
 - **Core Production Upgrades Delivered**:
+  - **Balanced System Equilibrium & Golden-Mean Optimization**:
+    - Latency vs Accuracy: Concise derivations (<45 words) ensure sub-2s inference for standard questions while reserving deep state tracing for complex DSA/multi-select questions.
+    - Quota & Rate-Limit Harmony: Balanced distribution across S-tier flagships (120B/70B) and hedged fallbacks without triggering OTPM or 429 rate limit storms.
+    - Concurrency & Resource Efficiency: In-flight deduplication mutex and 2.5s rapid-fire coalesce cache prevent redundant API calls. SQLite WAL connection pooling.
   - **Absolute Extreme Accuracy & Verified Consensus Engine (`backend/core/`)**:
-    - Mandatory Structured Verification: Enforced rigorous mathematical/algorithmic proof in `"reason"` before `"answer"` across all question types (`mcq`, `multi`, `order`, `text`, `code`). Explicit state tracing for `mergeTwoLists`, `flattenLL`, `Max-Heap`, `asteroidCollision`, and `stack/queue`.
+    - Mandatory Structured Verification: Enforced mathematical/algorithmic proof in `"reason"` before `"answer"`. Explicit state tracing for `mergeTwoLists`, `flattenLL`, `Max-Heap`, `asteroidCollision`.
     - Per-Option 2-of-3 Bitwise Majority Voting (`compute_multi_majority_indices`): $S_{\text{majority}} = \{ i \mid \sum_{m \in \{A, B, C\}} (i \in S_m) \ge 2 \}$; drops single-model hallucinations; applies Intersection Rescue ($S_A \cap S_B$) on Arbiter 429/offline.
     - Triangulation Consensus & 2-Model Agreement: For `mcq`/`order`/`text`, requires at least 2 independent models to derive the exact same canonical answer before granting `HIGH_CONSENSUS` or `MEDIUM_TIEBREAKER_AGREE`.
     - Substring & Token Snap-to-Grid (`snap_to_closest_option`): Substring containment bonus and distinctive numerical/identifier match bonus eliminating out-of-bounds `HALLUCINATED_OPTION` exceptions.
