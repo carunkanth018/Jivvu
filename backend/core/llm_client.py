@@ -1355,7 +1355,7 @@ async def solve_question(
                     s_texts = [options[i] for i in intersect_indices]
                     return SolverResponse(
                         status="OK",
-                        confidence_tier="MEDIUM_TIEBREAKER_AGREE",
+                        confidence_tier="MEDIUM_TIEBREAKER_AGREE" if method == "intersection_rescue" else "LOW_FALLBACK",
                         canonical_key=", ".join(c_keys),
                         selected_index=intersect_indices[0],
                         selected_text=", ".join(s_texts),
